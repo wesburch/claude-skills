@@ -26,17 +26,39 @@ Global skills are custom commands (invoked with `/skill-name`) that extend Claud
    # Or link all skills at once
    for skill in ~/claude-skills/*/; do
      skill_name=$(basename "$skill")
+     [[ "$skill_name" == "commands" ]] && continue
      ln -s "$skill" "$skill_name"
    done
    ```
 
-3. **Verify installation:**
+3. **Symlink slash commands into Claude's config:**
+   ```bash
+   cd ~/.claude/commands
+
+   for cmd in ~/claude-skills/commands/*.md; do
+     ln -s "$cmd" "$(basename "$cmd")"
+   done
+   ```
+
+4. **Verify installation:**
    ```bash
    ls -la ~/.claude/skills
+   ls -la ~/.claude/commands
    ```
-   You should see symlinks pointing to `~/claude-skills/[skill-name]`
+   You should see symlinks pointing to `~/claude-skills/`
 
 ## Available Skills
+
+### `/wiki-query` - Query the Wiki
+**Description:** Answer a question from the personal knowledge base at `~/Documents/MyProjects/wiki/`.
+
+### `/wiki-ingest` - Ingest a Source into the Wiki
+**Description:** Add a new source (file, URL, or pasted text) to the wiki, creating/updating pages and updating the index.
+
+### `/wiki-lint` - Audit the Wiki
+**Description:** Health check — finds broken links, orphan pages, missing frontmatter, contradictions, and stale content.
+
+---
 
 ### `/spec` - Feature Specification Generator
 
