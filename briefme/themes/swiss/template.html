@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{CLIENT_NAME}} — {{MODE_LABEL}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" />
+<style>
+  /* ------------------------------------------------------------------
+     briefme · theme: swiss (heavy grotesk, structural grid)
+     -------------------------------------------------------------------
+     Strict grid. Big Space Grotesk display. Hard rules, oversized
+     numerals. Accent used as highlighter strips. Brand-color driven.
+     ------------------------------------------------------------------ */
+
+  :root {
+    --c-primary:    {{COLOR_PRIMARY}};
+    --c-accent:     {{COLOR_ACCENT}};
+    --c-background: {{COLOR_BACKGROUND}};
+    --c-surface:    {{COLOR_SURFACE}};
+    --c-text:       {{COLOR_TEXT}};
+    --c-muted:      {{COLOR_MUTED}};
+    --c-border:     {{COLOR_BORDER}};
+
+    --c-paper: var(--c-background);
+    --c-page:  var(--c-surface);
+    --c-rule:  var(--c-text);
+    --c-soft:  var(--c-border);
+
+    /* automatically pick legible text color when sitting on --c-accent */
+    --on-accent: var(--c-primary);
+
+    --f-display: 'Space Grotesk', 'Inter Tight', sans-serif;
+    --f-sans:    'Inter Tight', system-ui, sans-serif;
+    --f-mono:    'JetBrains Mono', ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--c-page);
+    color: var(--c-text);
+    font-family: var(--f-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .page {
+    max-width: 920px;
+    margin: 0 auto;
+    background: var(--c-paper);
+  }
+
+  /* --- top band: tabular grid metadata ------------------------ */
+  .band {
+    background: var(--c-rule);
+    color: var(--c-paper);
+    padding: 14px 48px;
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 24px;
+  }
+  .band .cell { display: flex; flex-direction: column; gap: 2px; }
+  .band .lbl { color: color-mix(in srgb, var(--c-paper) 50%, transparent); font-size: 10px; }
+  .band .val { color: var(--c-paper); font-size: 12px; }
+  .band .val.acc { color: var(--c-accent); font-weight: 600; }
+  .band a { color: inherit; text-decoration: none; }
+
+  /* --- header ------------------------------------------------- */
+  .header {
+    padding: 56px 48px 48px;
+    border-bottom: 8px solid var(--c-rule);
+    display: grid;
+    grid-template-columns: 1fr 200px;
+    gap: 48px;
+    align-items: end;
+  }
+  .title {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 64px;
+    line-height: 0.92;
+    letter-spacing: -0.035em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .title em {
+    font-style: normal;
+    background: var(--c-accent);
+    color: var(--on-accent);
+    padding: 0 8px;
+    margin: 0 -2px;
+  }
+  .header-meta {
+    display: grid;
+    gap: 14px;
+  }
+  .header-meta .row {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .header-meta .row .l { color: var(--c-muted); display: block; margin-bottom: 2px; }
+  .header-meta .row .v { color: var(--c-text); font-weight: 500; }
+  .tagline {
+    grid-column: 1 / 2;
+    margin: 28px 0 0;
+    max-width: 56ch;
+    font-size: 15.5px;
+    line-height: 1.55;
+    color: var(--c-muted);
+  }
+
+  /* --- body --------------------------------------------------- */
+  .body {
+    padding: 40px 48px 32px;
+  }
+
+  /* --- section ------------------------------------------------ */
+  .section {
+    padding: 36px 0;
+    border-bottom: 1px solid var(--c-rule);
+  }
+  .section:first-child { padding-top: 0; }
+  .section:last-child { border-bottom: 0; }
+  /* --- section label (plain heading with bottom rule) -------- */
+  .section-label {
+    margin: 0 0 28px;
+    padding-bottom: 14px;
+    border-bottom: 2px solid var(--c-rule);
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--c-text);
+  }
+
+  /* --- card --------------------------------------------------- */
+  .card {
+    padding: 22px 0;
+    border-top: 1px solid var(--c-soft);
+  }
+  .card:first-child { border-top: 0; padding-top: 0; }
+  .card--with-stat {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 40px;
+    align-items: start;
+  }
+  .card-main { min-width: 0; }
+  .card-eyebrow {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--c-muted);
+    margin: 0 0 8px;
+    display: inline-block;
+    padding: 2px 8px;
+    background: var(--c-rule);
+    color: var(--c-paper);
+  }
+  .card-eyebrow + .card-title {
+    margin-top: 12px;
+  }
+  .card-title {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 28px;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    margin: 0 0 14px;
+    color: var(--c-text);
+    text-wrap: balance;
+    max-width: 22ch;
+  }
+  .card-title em {
+    font-style: normal;
+    background: var(--c-accent);
+    color: var(--on-accent);
+    padding: 0 6px;
+  }
+  .card p { margin: 0 0 10px; max-width: 64ch; }
+  .card p:last-child { margin-bottom: 0; }
+
+  /* --- bullets ------------------------------------------------ */
+  .bullets {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    counter-reset: bullet;
+  }
+  .bullets > li {
+    counter-increment: bullet;
+    position: relative;
+    padding: 8px 0 8px 32px;
+    border-top: 1px solid var(--c-soft);
+  }
+  .bullets > li:first-child { border-top: 0; padding-top: 4px; }
+  .bullets > li::before {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 16px;
+    width: 10px; height: 10px;
+    background: var(--c-accent);
+  }
+  .bullets > li:first-child::before { top: 12px; }
+  ol.bullets > li::before {
+    content: counter(bullet, decimal-leading-zero);
+    background: transparent;
+    width: auto; height: auto;
+    top: 9px;
+    left: 0;
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 15px;
+    color: var(--c-text);
+    letter-spacing: -0.02em;
+  }
+  ol.bullets > li:first-child::before { top: 5px; }
+  .bullets strong { font-weight: 600; }
+
+  /* --- stat --------------------------------------------------- */
+  .stat {
+    text-align: right;
+    min-width: 160px;
+    border-top: 4px solid var(--c-accent);
+    padding-top: 12px;
+  }
+  .stat-value {
+    font-family: var(--f-display);
+    font-size: 64px;
+    font-weight: 700;
+    line-height: 0.9;
+    letter-spacing: -0.045em;
+    color: var(--c-text);
+    margin: 0;
+  }
+  .stat-label {
+    margin-top: 10px;
+    font-family: var(--f-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--c-muted);
+    line-height: 1.4;
+    max-width: 20ch;
+    margin-left: auto;
+  }
+
+  /* --- callout ------------------------------------------------ */
+  .callout {
+    background: var(--c-rule);
+    color: var(--c-paper);
+    padding: 32px 36px;
+    margin: 0 0 32px;
+    position: relative;
+  }
+  .callout::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 12px;
+    background: var(--c-accent);
+  }
+  .callout p {
+    font-family: var(--f-display);
+    font-weight: 500;
+    font-size: 21px;
+    line-height: 1.35;
+    letter-spacing: -0.01em;
+    margin: 0 0 14px;
+    max-width: 38ch;
+  }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout p em {
+    font-style: normal;
+    background: var(--c-accent);
+    color: var(--on-accent);
+    padding: 0 6px;
+  }
+
+  /* --- findings ----------------------------------------------- */
+  .findings {
+    list-style: none;
+    counter-reset: finding;
+    margin: 0;
+    padding: 0;
+  }
+  .findings > li {
+    counter-increment: finding;
+    position: relative;
+    padding: 28px 0 28px 96px;
+    border-top: 1px solid var(--c-soft);
+  }
+  .findings > li:first-child { border-top: 0; padding-top: 0; }
+  .findings > li::before {
+    content: counter(finding, decimal-leading-zero);
+    position: absolute;
+    left: 0;
+    top: 24px;
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 52px;
+    line-height: 0.85;
+    letter-spacing: -0.04em;
+    color: var(--c-text);
+  }
+  .findings > li:first-child::before { top: -4px; }
+  .findings > li::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 70px;
+    width: 32px;
+    height: 4px;
+    background: var(--c-accent);
+  }
+  .findings > li:first-child::after { top: 42px; }
+  .findings h3 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 24px;
+    line-height: 1.15;
+    letter-spacing: -0.018em;
+    margin: 0 0 14px;
+    max-width: 28ch;
+    text-wrap: balance;
+    color: var(--c-text);
+  }
+  .findings h3 em {
+    font-style: normal;
+    background: var(--c-accent);
+    color: var(--on-accent);
+    padding: 0 6px;
+  }
+  .findings p { margin: 0 0 10px; max-width: 64ch; }
+  .findings .source {
+    font-family: var(--f-mono);
+    font-style: normal;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--c-muted);
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--c-soft);
+    display: inline-block;
+  }
+
+  /* --- code --------------------------------------------------- */
+  code {
+    font-family: var(--f-mono);
+    font-size: 0.88em;
+    padding: 1px 6px;
+    background: var(--c-accent);
+    color: var(--on-accent);
+    font-weight: 500;
+  }
+  pre {
+    margin: 16px 0;
+    background: var(--c-paper);
+    color: var(--c-text);
+    font-family: var(--f-mono);
+    font-size: 13px;
+    line-height: 1.6;
+    border: 1px solid var(--c-rule);
+    overflow: hidden;
+  }
+  pre .code-header {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 16px;
+    background: var(--c-rule);
+    color: var(--c-paper);
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  pre .code-header .lang { color: var(--c-accent); font-weight: 600; }
+  pre code {
+    display: block;
+    padding: 16px 20px;
+    background: transparent;
+    color: inherit;
+    font-weight: 400;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  pre code .tok-kw   { color: #8839EF; font-weight: 600; }
+  pre code .tok-fn   { color: #1E66F5; font-weight: 600; }
+  pre code .tok-str  { color: #40A02B; }
+  pre code .tok-num  { color: #FE640B; }
+  pre code .tok-com  { color: var(--c-muted); font-style: italic; }
+  pre code .tok-prop { color: #DC8A78; }
+
+  /* --- footer ------------------------------------------------- */
+  .footer {
+    padding: 24px 48px;
+    background: var(--c-rule);
+    color: var(--c-paper);
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    display: flex;
+    justify-content: space-between;
+  }
+  .footer .acc {
+    background: var(--c-accent);
+    color: var(--on-accent);
+    padding: 2px 8px;
+    font-weight: 600;
+  }
+
+  /* --- print ------------------------------------------------- */
+  @media print {
+    body { font-size: 11pt; background: var(--c-paper); }
+    .band, .header, .footer { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .card, .findings > li, pre { break-inside: avoid; }
+  }
+
+  /* --- small screens ----------------------------------------- */
+  @media (max-width: 640px) {
+    .band { grid-template-columns: repeat(2, 1fr); padding: 12px 20px; gap: 12px; }
+    .header { padding: 36px 20px 28px; grid-template-columns: 1fr; gap: 24px; }
+    .body { padding: 28px 20px 24px; }
+    .footer { padding: 20px; }
+    .title { font-size: 44px; }
+    .findings > li { padding-left: 56px; padding-top: 20px; padding-bottom: 20px; }
+    .findings > li::before { font-size: 40px; top: 20px; }
+    .findings > li:first-child::before { top: -2px; }
+    .findings > li::after { top: 56px; }
+    .findings > li:first-child::after { top: 32px; }
+    .section-label { display: block; }
+    .card-title { font-size: 22px; }
+    .card--with-stat { grid-template-columns: 1fr; gap: 20px; }
+    .stat { text-align: left; min-width: 0; }
+    .stat-value { font-size: 48px; }
+    .stat-label { margin-left: 0; }
+    .callout p { font-size: 18px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="band">
+  <span class="cell"><span class="lbl">Client</span><span class="val acc"><a href="{{CLIENT_URL}}">{{CLIENT_NAME}}</a></span></span>
+  <span class="cell"><span class="lbl">Type</span><span class="val">{{MODE_LABEL}}</span></span>
+  <span class="cell"><span class="lbl">Date</span><span class="val">{{DATE}}</span></span>
+  <span class="cell"><span class="lbl">Status</span><span class="val">Draft</span></span>
+</header>
+
+<main class="page">
+  <section class="header">
+    <h1 class="title">{{TITLE}}</h1>
+    <div class="header-meta">
+      <div class="row">
+        <span class="l">Client</span>
+        <span class="v">{{CLIENT_NAME}}</span>
+      </div>
+      <div class="row">
+        <span class="l">Mode</span>
+        <span class="v">{{MODE_LABEL}}</span>
+      </div>
+      <div class="row">
+        <span class="l">Date</span>
+        <span class="v">{{DATE}}</span>
+      </div>
+    </div>
+    <p class="tagline">{{TAGLINE}}</p>
+  </section>
+
+  <div class="body">
+    <!-- BODY -->
+  </div>
+</main>
+
+<footer class="footer">
+  <span><span class="acc">{{CLIENT_NAME}}</span></span>
+  <span>briefme · {{MODE_LABEL}} · {{DATE}}</span>
+</footer>
+
+</body>
+</html>

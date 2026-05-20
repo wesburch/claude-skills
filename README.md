@@ -87,6 +87,36 @@ Global skills are custom commands (invoked with `/skill-name`) that extend Claud
 
 ---
 
+### `/briefme` - Branded HTML Brief Generator
+
+**Description:** Turn agent work into a polished, branded HTML document — status updates, client meeting talking points, or research findings. Pulls brand colors from `.claude/brand.json` in the current repo so each client's brief looks like their brand.
+
+**Usage:**
+```bash
+/briefme status                 # Dense work log for internal review
+/briefme meeting                # Section cards for live client meetings
+/briefme research               # Findings deliverable with exec summary
+/briefme meeting editorial      # Use a specific theme
+/briefme meeting "Optional inline content if not synthesizing from conversation"
+```
+
+**Available themes:** `default` (refined editorial), `engineered` (technical / mono-led), `magazine` (bold editorial display), `swiss` (modernist / gridded). See [`briefme/themes/README.md`](./briefme/themes/README.md) for full descriptions and the contract for adding new ones.
+
+**Theme selection:** CLI arg → `brand.json` `theme` field → interactive prompt.
+
+**What it does:**
+1. Resolves the repo root and looks up `.claude/brand.json` for the client's colors
+2. If brand.json is missing, offers to create one interactively
+3. Composes the brief from the conversation (or inline content) using the chosen layout
+4. Renders `template.html` with the brand variables substituted
+5. Writes to `<repo>/.claude/briefs/<mode>-YYYY-MM-DD-HHMM.html` and opens it in your browser
+
+**Setup per client:** drop a `brand.json` in the project repo's `.claude/` folder. See [`briefme/brand.example.json`](./briefme/brand.example.json) for the schema.
+
+[Full documentation](./briefme/SKILL.md)
+
+---
+
 ## Creating a New Skill
 
 ### Basic Structure

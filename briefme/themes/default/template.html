@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{CLIENT_NAME}} — {{MODE_LABEL}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" />
+<style>
+  /* ------------------------------------------------------------------
+     briefme · theme: default (editorial / design studio)
+     -------------------------------------------------------------------
+     A confident, editorial layout: big Instrument Serif italic display,
+     Inter Tight body, JetBrains Mono metadata. Code-friendly: inline
+     <code> as subtle surface chips, <pre> as dark panels with optional
+     file/lang headers. Works for status / meeting / research modes.
+     ------------------------------------------------------------------ */
+
+  :root {
+    --c-primary:    {{COLOR_PRIMARY}};
+    --c-accent:     {{COLOR_ACCENT}};
+    --c-background: {{COLOR_BACKGROUND}};
+    --c-surface:    {{COLOR_SURFACE}};
+    --c-text:       {{COLOR_TEXT}};
+    --c-muted:      {{COLOR_MUTED}};
+    --c-border:     {{COLOR_BORDER}};
+
+    --f-serif: 'Instrument Serif', 'Times New Roman', serif;
+    --f-sans:  'Inter Tight', system-ui, -apple-system, sans-serif;
+    --f-mono:  'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--c-background);
+    color: var(--c-text);
+    font-family: var(--f-sans);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* --- accent bar at very top ----------------------------------- */
+  .accent-bar {
+    height: 8px;
+    background: var(--c-primary);
+    position: relative;
+  }
+  .accent-bar::after {
+    content: "";
+    position: absolute;
+    inset: 0 0 0 auto;
+    width: 30%;
+    background: var(--c-accent);
+  }
+
+  /* --- page shell ----------------------------------------------- */
+  .page {
+    max-width: 820px;
+    margin: 0 auto;
+  }
+
+  /* --- header --------------------------------------------------- */
+  .header {
+    padding: 56px 64px 32px;
+    border-bottom: 1px solid var(--c-text);
+  }
+  .header-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--c-muted);
+    margin-bottom: 56px;
+  }
+  .client {
+    color: var(--c-primary);
+    font-weight: 500;
+  }
+  .client::before {
+    content: "";
+    display: inline-block;
+    width: 6px; height: 6px;
+    background: var(--c-accent);
+    margin-right: 8px;
+    vertical-align: 2px;
+  }
+  .client a { color: inherit; text-decoration: none; }
+  .client a:hover { text-decoration: underline; }
+  .mode-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .mode-tag::before {
+    content: "";
+    width: 4px; height: 4px;
+    border-radius: 50%;
+    background: var(--c-muted);
+  }
+
+  .title {
+    font-family: var(--f-serif);
+    font-weight: 400;
+    font-size: 64px;
+    line-height: 0.98;
+    letter-spacing: -0.02em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .title em { font-style: italic; color: var(--c-primary); }
+  .tagline {
+    font-size: 15px;
+    color: var(--c-muted);
+    margin: 24px 0 0;
+    max-width: 56ch;
+  }
+
+  /* --- body ----------------------------------------------------- */
+  .body {
+    padding: 48px 64px 64px;
+  }
+
+  /* --- section + section-label --------------------------------- */
+  .section {
+    margin-top: 36px;
+  }
+  .section:first-child { margin-top: 0; }
+  .section-label {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--c-muted);
+    margin: 0 0 14px;
+  }
+  .section-label::before {
+    content: "§ ";
+    color: var(--c-accent);
+  }
+
+  /* --- card ----------------------------------------------------- */
+  .card {
+    padding: 24px 0 28px;
+    border-top: 1px solid var(--c-border);
+  }
+  .card:first-child { border-top: 0; padding-top: 0; }
+  .card--with-stat {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 48px;
+    align-items: start;
+  }
+  .card-main { min-width: 0; }
+  .card-eyebrow {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--c-accent);
+    margin: 0 0 10px;
+  }
+  .card-title {
+    font-family: var(--f-serif);
+    font-weight: 400;
+    font-size: 34px;
+    line-height: 1.06;
+    letter-spacing: -0.018em;
+    margin: 0 0 14px;
+    color: var(--c-text);
+    text-wrap: balance;
+  }
+  .card-title em { font-style: italic; color: var(--c-primary); }
+  .card p {
+    margin: 0 0 12px;
+    max-width: 64ch;
+  }
+  .card p:last-child { margin-bottom: 0; }
+
+  /* --- bullets (handles ul AND ol) ----------------------------- */
+  .bullets {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    counter-reset: bullet;
+  }
+  .bullets > li {
+    counter-increment: bullet;
+    position: relative;
+    padding: 10px 0 10px 28px;
+    border-top: 1px dashed var(--c-border);
+  }
+  .bullets > li:first-child { border-top: 0; padding-top: 4px; }
+  .bullets > li::before {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 19px;
+    width: 6px; height: 6px;
+    background: var(--c-accent);
+    border-radius: 50%;
+  }
+  .bullets > li:first-child::before { top: 13px; }
+  ol.bullets > li::before {
+    content: counter(bullet, decimal-leading-zero);
+    background: transparent;
+    border-radius: 0;
+    width: auto; height: auto;
+    top: 12px;
+    left: 0;
+    font-family: var(--f-mono);
+    font-size: 11px;
+    color: var(--c-accent);
+    letter-spacing: 0.04em;
+  }
+  ol.bullets > li:first-child::before { top: 6px; }
+  .bullets strong { font-weight: 600; }
+
+  /* --- stat ----------------------------------------------------- */
+  .stat {
+    text-align: right;
+    min-width: 160px;
+    border-left: 1px solid var(--c-border);
+    padding-left: 32px;
+  }
+  .stat-value {
+    font-family: var(--f-serif);
+    font-style: italic;
+    font-size: 80px;
+    line-height: 0.9;
+    letter-spacing: -0.04em;
+    color: var(--c-primary);
+    margin: 0;
+  }
+  .stat-label {
+    margin-top: 10px;
+    font-family: var(--f-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--c-muted);
+    line-height: 1.4;
+    max-width: 18ch;
+    margin-left: auto;
+  }
+
+  /* --- callout (research exec summary) ------------------------- */
+  .callout {
+    background: var(--c-surface);
+    border-left: 3px solid var(--c-accent);
+    padding: 28px 36px;
+    margin: 0 0 28px;
+  }
+  .callout p {
+    font-family: var(--f-serif);
+    font-size: 22px;
+    line-height: 1.35;
+    letter-spacing: -0.005em;
+    margin: 0;
+    color: var(--c-text);
+  }
+  .callout p + p { margin-top: 14px; }
+
+  /* --- findings (research) ------------------------------------- */
+  .findings {
+    list-style: none;
+    counter-reset: finding;
+    margin: 0;
+    padding: 0;
+  }
+  .findings > li {
+    counter-increment: finding;
+    position: relative;
+    padding: 32px 0 32px 100px;
+    border-top: 1px solid var(--c-border);
+  }
+  .findings > li:first-child { border-top: 0; padding-top: 4px; }
+  .findings > li::before {
+    content: counter(finding, decimal-leading-zero);
+    position: absolute;
+    left: 0;
+    top: 28px;
+    font-family: var(--f-serif);
+    font-style: italic;
+    font-size: 52px;
+    line-height: 0.9;
+    color: var(--c-accent);
+    letter-spacing: -0.03em;
+  }
+  .findings > li:first-child::before { top: 0; }
+  .findings h3 {
+    font-family: var(--f-serif);
+    font-size: 26px;
+    font-weight: 400;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    margin: 0 0 12px;
+    color: var(--c-text);
+    text-wrap: balance;
+  }
+  .findings h3 em { font-style: italic; color: var(--c-primary); }
+  .findings p { margin: 0 0 10px; max-width: 64ch; }
+  .findings .source {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    color: var(--c-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-style: normal;
+    margin-top: 12px;
+  }
+
+  /* --- code ----------------------------------------------------- */
+  code {
+    font-family: var(--f-mono);
+    font-size: 0.86em;
+    padding: 1px 6px;
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+    border-radius: 4px;
+    color: var(--c-primary);
+    white-space: nowrap;
+  }
+  pre {
+    margin: 16px 0;
+    background: #0E1116;
+    color: #E6E8EB;
+    border-radius: 6px;
+    font-family: var(--f-mono);
+    font-size: 13px;
+    line-height: 1.55;
+    overflow: hidden;
+    border: 1px solid #1f2429;
+  }
+  pre .code-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 14px;
+    background: #050709;
+    border-bottom: 1px solid #1f2429;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #7a828c;
+  }
+  pre .code-header .lang { color: var(--c-accent); font-weight: 600; }
+  pre code {
+    display: block;
+    padding: 14px 16px;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    color: inherit;
+    white-space: pre;
+    overflow-x: auto;
+    font-size: 13px;
+  }
+  /* light syntax tokens — agent can apply if desired */
+  pre code .tok-kw   { color: #C792EA; }
+  pre code .tok-fn   { color: #82AAFF; }
+  pre code .tok-str  { color: #C3E88D; }
+  pre code .tok-num  { color: #F78C6C; }
+  pre code .tok-com  { color: #6b727c; font-style: italic; }
+  pre code .tok-prop { color: #FFCB6B; }
+
+  /* --- footer --------------------------------------------------- */
+  .footer {
+    margin: 0 64px;
+    padding: 24px 0 56px;
+    border-top: 1px solid var(--c-text);
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--f-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--c-muted);
+  }
+  .footer .brand-mark { color: var(--c-primary); font-weight: 500; }
+  .footer .brand-mark::before {
+    content: "";
+    display: inline-block;
+    width: 6px; height: 6px;
+    background: var(--c-accent);
+    margin-right: 8px;
+    vertical-align: 2px;
+  }
+
+  /* --- print --------------------------------------------------- */
+  @media print {
+    .accent-bar { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    body { font-size: 11pt; }
+    .header, .body, .footer { padding-left: 0; padding-right: 0; margin-left: 0; margin-right: 0; }
+    .card, .findings > li { break-inside: avoid; }
+    pre { break-inside: avoid; }
+  }
+
+  /* --- small screens ------------------------------------------- */
+  @media (max-width: 640px) {
+    .header { padding: 40px 24px 24px; }
+    .body { padding: 32px 24px 48px; }
+    .footer { margin: 0 24px; padding: 20px 0 40px; }
+    .title { font-size: 44px; }
+    .card-title { font-size: 26px; }
+    .card--with-stat { grid-template-columns: 1fr; gap: 24px; }
+    .stat { text-align: left; border-left: 0; padding-left: 0; border-top: 1px solid var(--c-border); padding-top: 18px; min-width: 0; }
+    .stat-label { margin-left: 0; }
+    .findings > li { padding-left: 0; padding-top: 56px; }
+    .findings > li::before { font-size: 40px; top: 4px; }
+    .findings > li:first-child::before { top: 4px; }
+  }
+</style>
+</head>
+<body>
+<div class="accent-bar"></div>
+<main class="page">
+  <header class="header">
+    <p class="header-meta">
+      <span class="client"><a href="{{CLIENT_URL}}">{{CLIENT_NAME}}</a></span>
+      <span class="mode-tag">{{MODE_LABEL}} · {{DATE}}</span>
+    </p>
+    <h1 class="title">{{TITLE}}</h1>
+    <p class="tagline">{{TAGLINE}}</p>
+  </header>
+
+  <div class="body">
+    <!-- BODY -->
+  </div>
+
+  <footer class="footer">
+    <span class="brand-mark">{{CLIENT_NAME}}</span>
+    <span>{{DATE}}</span>
+  </footer>
+</main>
+</body>
+</html>

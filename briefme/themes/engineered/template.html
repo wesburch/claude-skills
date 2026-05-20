@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{CLIENT_NAME}} — {{MODE_LABEL}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" />
+<style>
+  /* ------------------------------------------------------------------
+     briefme · theme: engineered (spec sheet / RFC)
+     -------------------------------------------------------------------
+     Tabular, mono-dominant, status-tagged. Code blocks are first-class:
+     line numbers + file/lang headers. Reads like a real engineering
+     design doc.
+     ------------------------------------------------------------------ */
+
+  :root {
+    --c-primary:    {{COLOR_PRIMARY}};
+    --c-accent:     {{COLOR_ACCENT}};
+    --c-background: {{COLOR_BACKGROUND}};
+    --c-surface:    {{COLOR_SURFACE}};
+    --c-text:       {{COLOR_TEXT}};
+    --c-muted:      {{COLOR_MUTED}};
+    --c-border:     {{COLOR_BORDER}};
+
+    /* Engineered uses the client's background as the page tint and
+       creates a strong "paper" surface for the actual content area. */
+    --c-paper:      var(--c-background);
+    --c-page:       var(--c-surface);
+    --c-line:       var(--c-border);
+    --c-strong:     var(--c-text);
+    --c-code-bg:    #0E1116;
+    --c-code-fg:    #E6E8EB;
+
+    --f-sans: 'IBM Plex Sans', system-ui, sans-serif;
+    --f-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--c-page);
+    color: var(--c-text);
+    font-family: var(--f-sans);
+    font-size: 14px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* --- top ticker / banner ------------------------------------- */
+  .ticker {
+    background: var(--c-strong);
+    color: var(--c-page);
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 10px 32px;
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .ticker .acc { color: var(--c-accent); }
+
+  /* --- page shell ---------------------------------------------- */
+  .page {
+    max-width: 880px;
+    margin: 0 auto;
+    background: var(--c-paper);
+  }
+
+  /* --- header --------------------------------------------------- */
+  .header {
+    padding: 40px 48px 28px;
+    border-bottom: 2px solid var(--c-strong);
+  }
+  .header-stamp {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--c-muted);
+    margin: 0 0 24px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  .header-stamp .lbl { color: var(--c-muted); margin-right: 6px; }
+  .header-stamp .val { color: var(--c-text); }
+  .header-stamp a { color: inherit; text-decoration: none; }
+  .header-stamp a:hover { text-decoration: underline; }
+  .header-stamp .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    border: 1px solid var(--c-line);
+    color: var(--c-accent);
+  }
+  .header-stamp .tag::before {
+    content: "";
+    width: 6px; height: 6px;
+    background: var(--c-accent);
+    border-radius: 50%;
+  }
+
+  .title {
+    font-family: var(--f-mono);
+    font-size: 32px;
+    font-weight: 500;
+    line-height: 1.12;
+    letter-spacing: -0.018em;
+    margin: 0;
+    color: var(--c-text);
+  }
+  .title em {
+    font-style: normal;
+    color: var(--c-accent);
+    font-weight: 500;
+  }
+  .tagline {
+    font-family: var(--f-mono);
+    font-size: 12.5px;
+    color: var(--c-muted);
+    margin: 14px 0 0;
+    max-width: 72ch;
+    line-height: 1.55;
+  }
+
+  /* --- body ---------------------------------------------------- */
+  .body {
+    padding: 32px 48px 48px;
+  }
+
+  /* --- section + section-label --------------------------------- */
+  .section {
+    padding: 28px 0;
+    border-bottom: 1px solid var(--c-line);
+  }
+  .section:first-child { padding-top: 0; }
+  .section:last-child { border-bottom: 0; }
+  .section-label {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin: 0 0 20px;
+    padding-bottom: 8px;
+    border-bottom: 1px dashed var(--c-line);
+    font-family: var(--f-mono);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--c-text);
+  }
+  .section-label::before {
+    content: "§";
+    color: var(--c-accent);
+    font-weight: 500;
+    margin-right: -8px;
+  }
+
+  /* --- card ---------------------------------------------------- */
+  .card {
+    padding: 18px 0;
+    border-top: 1px dashed var(--c-line);
+  }
+  .card:first-child { border-top: 0; padding-top: 0; }
+  .card--with-stat {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 36px;
+    align-items: start;
+  }
+  .card-main { min-width: 0; }
+  .card-eyebrow {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--c-accent);
+    margin: 0 0 8px;
+  }
+  .card-title {
+    font-family: var(--f-sans);
+    font-weight: 600;
+    font-size: 19px;
+    line-height: 1.25;
+    letter-spacing: -0.005em;
+    margin: 0 0 12px;
+    color: var(--c-text);
+  }
+  .card-title em {
+    font-style: normal;
+    color: var(--c-accent);
+  }
+  .card p {
+    margin: 0 0 10px;
+    max-width: 70ch;
+  }
+  .card p:last-child { margin-bottom: 0; }
+
+  /* --- bullets (ul + ol) --------------------------------------- */
+  .bullets {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    counter-reset: bullet;
+  }
+  .bullets > li {
+    counter-increment: bullet;
+    position: relative;
+    padding: 8px 0 8px 32px;
+    border-top: 1px dotted var(--c-line);
+  }
+  .bullets > li:first-child { border-top: 0; padding-top: 2px; }
+  .bullets > li::before {
+    content: "→";
+    position: absolute;
+    left: 0;
+    top: 10px;
+    font-family: var(--f-mono);
+    font-size: 12px;
+    color: var(--c-accent);
+  }
+  .bullets > li:first-child::before { top: 4px; }
+  ol.bullets > li::before {
+    content: counter(bullet, decimal-leading-zero);
+    font-family: var(--f-mono);
+    font-size: 11px;
+    color: var(--c-accent);
+    letter-spacing: 0.06em;
+  }
+  .bullets strong { font-weight: 600; }
+
+  /* --- stat ---------------------------------------------------- */
+  .stat {
+    text-align: right;
+    min-width: 140px;
+    border-left: 2px solid var(--c-strong);
+    padding-left: 24px;
+    padding-top: 4px;
+  }
+  .stat-value {
+    font-family: var(--f-mono);
+    font-size: 44px;
+    font-weight: 500;
+    line-height: 1;
+    letter-spacing: -0.02em;
+    color: var(--c-text);
+    margin: 0;
+  }
+  .stat-label {
+    margin-top: 8px;
+    font-family: var(--f-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--c-muted);
+    line-height: 1.4;
+    max-width: 20ch;
+    margin-left: auto;
+  }
+
+  /* --- callout ------------------------------------------------- */
+  .callout {
+    background: var(--c-paper);
+    border: 1px solid var(--c-line);
+    border-left: 4px solid var(--c-accent);
+    padding: 24px 28px;
+    margin: 0 0 24px;
+  }
+  .callout p {
+    font-size: 16px;
+    line-height: 1.55;
+    margin: 0 0 12px;
+    color: var(--c-text);
+  }
+  .callout p:last-child { margin-bottom: 0; }
+
+  /* --- findings ------------------------------------------------ */
+  .findings {
+    list-style: none;
+    counter-reset: finding;
+    margin: 0;
+    padding: 0;
+  }
+  .findings > li {
+    counter-increment: finding;
+    position: relative;
+    padding: 22px 0 22px 124px;
+    border-top: 1px dashed var(--c-line);
+  }
+  .findings > li:first-child { border-top: 0; padding-top: 0; }
+  .findings > li::before {
+    content: "F" counter(finding, decimal-leading-zero);
+    position: absolute;
+    left: 0;
+    top: 22px;
+    font-family: var(--f-mono);
+    font-size: 22px;
+    font-weight: 500;
+    line-height: 1;
+    color: var(--c-text);
+    letter-spacing: -0.01em;
+  }
+  .findings > li:first-child::before { top: 0; }
+  .findings h3 {
+    font-family: var(--f-sans);
+    font-size: 17px;
+    font-weight: 600;
+    line-height: 1.25;
+    letter-spacing: -0.005em;
+    margin: 0 0 10px;
+    color: var(--c-text);
+  }
+  .findings h3 em {
+    font-style: normal;
+    color: var(--c-accent);
+  }
+  .findings p { margin: 0 0 10px; max-width: 70ch; }
+  .findings .source {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    font-style: normal;
+    color: var(--c-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px dotted var(--c-line);
+    display: inline-block;
+  }
+
+  /* --- code ---------------------------------------------------- */
+  code {
+    font-family: var(--f-mono);
+    font-size: 0.88em;
+    padding: 1px 6px;
+    background: var(--c-surface);
+    border: 1px solid var(--c-line);
+    color: var(--c-primary);
+    white-space: nowrap;
+  }
+  pre {
+    margin: 14px 0;
+    background: var(--c-code-bg);
+    color: var(--c-code-fg);
+    font-family: var(--f-mono);
+    font-size: 12.5px;
+    line-height: 1.6;
+    border: 1px solid var(--c-strong);
+    overflow: hidden;
+  }
+  pre .code-header {
+    display: flex;
+    justify-content: space-between;
+    padding: 7px 14px;
+    background: #050709;
+    border-bottom: 1px solid #1f2429;
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #7a828c;
+  }
+  pre .code-header .file { color: var(--c-code-fg); }
+  pre .code-header .lang { color: var(--c-accent); font-weight: 600; }
+  pre code {
+    display: block;
+    padding: 12px 16px;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    white-space: pre;
+    overflow-x: auto;
+    font-size: 12.5px;
+  }
+  /* line-numbered variant — wrap each line in <span class="ln"> if desired */
+  pre code .ln {
+    display: inline-block;
+    width: 28px;
+    color: #4a5159;
+    text-align: right;
+    padding-right: 12px;
+    margin-right: 12px;
+    border-right: 1px solid #1f2429;
+    user-select: none;
+  }
+  pre code .tok-kw   { color: #C792EA; }
+  pre code .tok-fn   { color: #82AAFF; }
+  pre code .tok-str  { color: #C3E88D; }
+  pre code .tok-num  { color: #F78C6C; }
+  pre code .tok-com  { color: #6b727c; font-style: italic; }
+  pre code .tok-prop { color: #FFCB6B; }
+
+  /* --- footer -------------------------------------------------- */
+  .footer {
+    padding: 14px 32px;
+    background: var(--c-strong);
+    color: var(--c-page);
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    display: flex;
+    justify-content: space-between;
+  }
+  .footer .acc { color: var(--c-accent); }
+
+  /* --- print -------------------------------------------------- */
+  @media print {
+    body { background: var(--c-paper); font-size: 11pt; }
+    .ticker, .footer { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .findings > li, .card, pre { break-inside: avoid; }
+  }
+
+  /* --- small screens ------------------------------------------ */
+  @media (max-width: 640px) {
+    .ticker, .footer { padding-left: 20px; padding-right: 20px; }
+    .header { padding: 32px 24px 24px; }
+    .body { padding: 24px 24px 40px; }
+    .title { font-size: 24px; }
+    .card--with-stat { grid-template-columns: 1fr; gap: 16px; }
+    .stat { border-left: 0; border-top: 2px solid var(--c-strong); padding-left: 0; padding-top: 14px; text-align: left; min-width: 0; }
+    .stat-label { margin-left: 0; }
+    .findings > li { padding-left: 0; padding-top: 36px; }
+    .findings > li::before { top: 0; }
+    .findings > li:first-child::before { top: 0; }
+  }
+</style>
+</head>
+<body>
+<header class="ticker">
+  <span>briefme / <span class="acc">{{MODE_LABEL}}</span></span>
+  <span>{{CLIENT_NAME}} · {{DATE}}</span>
+</header>
+
+<main class="page">
+  <section class="header">
+    <p class="header-stamp">
+      <span><span class="lbl">Client</span><span class="val"><a href="{{CLIENT_URL}}">{{CLIENT_NAME}}</a></span></span>
+      <span><span class="lbl">Date</span><span class="val">{{DATE}}</span></span>
+      <span><span class="lbl">Type</span><span class="val">{{MODE_LABEL}}</span></span>
+      <span class="tag">Open for review</span>
+    </p>
+    <h1 class="title">{{TITLE}}</h1>
+    <p class="tagline">{{TAGLINE}}</p>
+  </section>
+
+  <div class="body">
+    <!-- BODY -->
+  </div>
+</main>
+
+<footer class="footer">
+  <span><span class="acc">●</span> {{CLIENT_NAME}}</span>
+  <span>briefme · {{MODE_LABEL}} · {{DATE}}</span>
+</footer>
+</body>
+</html>

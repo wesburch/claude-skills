@@ -1,0 +1,15 @@
+{
+  "client": "Acme Corp",
+  "url": "https://acme.com",
+  "tagline": "Brand platform & growth engineering",
+  "theme": "default",
+  "colors": {
+    "primary": "#0A2540",
+    "accent": "#635BFF",
+    "background": "#FFFFFF",
+    "surface": "#F7F7F9",
+    "text": "#0A0A0A",
+    "muted": "#6B7280",
+    "border": "#E5E7EB"
+  }
+}
