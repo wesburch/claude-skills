@@ -17,7 +17,8 @@
 
   :root {
     --c-primary:    {{COLOR_PRIMARY}};
-    --c-accent:     {{COLOR_ACCENT}};
+    --c-accent:      {{COLOR_ACCENT}};       /* text-safe accent (≥4.5:1 vs bg) */
+    --c-accent-deco: {{COLOR_ACCENT_DECO}};  /* decorative accent — original brand color, used on non-text dots/strips */
     --c-background: {{COLOR_BACKGROUND}};
     --c-surface:    {{COLOR_SURFACE}};
     --c-text:       {{COLOR_TEXT}};
@@ -96,7 +97,7 @@
   }
   .title em {
     font-style: normal;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
     color: var(--on-accent);
     padding: 0 8px;
     margin: 0 -2px;
@@ -189,7 +190,7 @@
   }
   .card-title em {
     font-style: normal;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
     color: var(--on-accent);
     padding: 0 6px;
   }
@@ -216,7 +217,7 @@
     left: 4px;
     top: 16px;
     width: 10px; height: 10px;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
   }
   .bullets > li:first-child::before { top: 12px; }
   ol.bullets > li::before {
@@ -238,7 +239,7 @@
   .stat {
     text-align: right;
     min-width: 160px;
-    border-top: 4px solid var(--c-accent);
+    border-top: 4px solid var(--c-accent-deco);
     padding-top: 12px;
   }
   .stat-value {
@@ -275,7 +276,7 @@
     position: absolute;
     left: 0; top: 0; bottom: 0;
     width: 12px;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
   }
   .callout p {
     font-family: var(--f-display);
@@ -289,7 +290,7 @@
   .callout p:last-child { margin-bottom: 0; }
   .callout p em {
     font-style: normal;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
     color: var(--on-accent);
     padding: 0 6px;
   }
@@ -328,7 +329,7 @@
     top: 70px;
     width: 32px;
     height: 4px;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
   }
   .findings > li:first-child::after { top: 42px; }
   .findings h3 {
@@ -344,7 +345,7 @@
   }
   .findings h3 em {
     font-style: normal;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
     color: var(--on-accent);
     padding: 0 6px;
   }
@@ -367,7 +368,7 @@
     font-family: var(--f-mono);
     font-size: 0.88em;
     padding: 1px 6px;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
     color: var(--on-accent);
     font-weight: 500;
   }
@@ -423,7 +424,7 @@
     justify-content: space-between;
   }
   .footer .acc {
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
     color: var(--on-accent);
     padding: 2px 8px;
     font-weight: 600;

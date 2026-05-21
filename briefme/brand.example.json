@@ -3,6 +3,7 @@
   "url": "https://acme.com",
   "tagline": "Brand platform & growth engineering",
   "theme": "default",
+  "verbosity": "standard",
   "colors": {
     "primary": "#0A2540",
     "accent": "#635BFF",
@@ -10,6 +11,12 @@
     "surface": "#F7F7F9",
     "text": "#0A0A0A",
     "muted": "#6B7280",
-    "border": "#E5E7EB"
+    "border": "#E5E7EB",
+    "palette": [
+      "#0A2540",
+      "#635BFF",
+      "#00D924",
+      "#FF5996"
+    ]
   }
 }

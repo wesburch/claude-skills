@@ -39,7 +39,8 @@ The skill substitutes these placeholders in `template.html` before writing the o
 | `{{TITLE}}` | agent-generated short title | "Auth refactor & dashboard kickoff" |
 | `{{DATE}}` | today | "May 20, 2026" |
 | `{{COLOR_PRIMARY}}` | `brand.json` colors | `#0A2540` |
-| `{{COLOR_ACCENT}}` | `brand.json` colors | `#635BFF` |
+| `{{COLOR_ACCENT}}` | `brand.json` colors (contrast-safe; ≥4.5:1 vs background) | `#635BFF` |
+| `{{COLOR_ACCENT_DECO}}` | `brand.json` colors (original brand value, even if light) | `#86C8BC` |
 | `{{COLOR_BACKGROUND}}` | `brand.json` colors | `#FFFFFF` |
 | `{{COLOR_SURFACE}}` | `brand.json` colors | `#F7F7F9` |
 | `{{COLOR_TEXT}}` | `brand.json` colors | `#0A0A0A` |
@@ -79,6 +80,27 @@ The agent generates the body using a stable set of classes so any theme can rend
 | `.section-label` | optional | Small uppercase label above a section |
 
 If your theme wants to add extra ornaments (rules, ornaments, accent bars), do it in your own theme-local classes — don't rename the shared ones.
+
+### Two-tier accent (mandatory for new themes)
+
+Every theme must declare two accent CSS variables in `:root`:
+
+```css
+--c-accent:      {{COLOR_ACCENT}};       /* text-safe accent (≥4.5:1 vs bg) — used wherever accent carries TEXT */
+--c-accent-deco: {{COLOR_ACCENT_DECO}};  /* decorative accent — original brand color, used on non-text dots/strips */
+```
+
+**Use `--c-accent` for:**
+- `color:` on text-carrying elements: `.card-eyebrow`, `pre .code-header .lang`, `.title em` (when em is text not bg-highlight), counter numbers in `ol.bullets > li::before`, `.findings > li::before` counters, `.section-label::before` symbol, link colors.
+- Anything that needs to be legible as text or text-like glyph.
+
+**Use `--c-accent-deco` for:**
+- `background:` fills on decorative pseudo-elements: dots, accent bars, callout strips.
+- `border-left:` / `border-top:` accent strips on `.callout`, `.stat`.
+- Highlight backgrounds behind text (e.g. `.title em { background: ... }`) — paired with dark text overlay via `color`.
+- The `.acc` / `.mark` decorative-dot classes in ticker/footer.
+
+When brand accent already passes 4.5:1, both variables receive the same value — visually identical to a single-accent theme. The two-tier system only diverges when contrast fallback fires (light pastel brand colors).
 
 ### Code evidence block
 

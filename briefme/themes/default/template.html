@@ -19,7 +19,8 @@
 
   :root {
     --c-primary:    {{COLOR_PRIMARY}};
-    --c-accent:     {{COLOR_ACCENT}};
+    --c-accent:      {{COLOR_ACCENT}};       /* text-safe accent (≥4.5:1 vs bg) */
+    --c-accent-deco: {{COLOR_ACCENT_DECO}};  /* decorative accent — original brand color, used on non-text dots/strips */
     --c-background: {{COLOR_BACKGROUND}};
     --c-surface:    {{COLOR_SURFACE}};
     --c-text:       {{COLOR_TEXT}};
@@ -56,7 +57,7 @@
     position: absolute;
     inset: 0 0 0 auto;
     width: 30%;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
   }
 
   /* --- page shell ----------------------------------------------- */
@@ -90,7 +91,7 @@
     content: "";
     display: inline-block;
     width: 6px; height: 6px;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
     margin-right: 8px;
     vertical-align: 2px;
   }
@@ -208,7 +209,7 @@
     left: 4px;
     top: 19px;
     width: 6px; height: 6px;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
     border-radius: 50%;
   }
   .bullets > li:first-child::before { top: 13px; }
@@ -258,7 +259,7 @@
   /* --- callout (research exec summary) ------------------------- */
   .callout {
     background: var(--c-surface);
-    border-left: 3px solid var(--c-accent);
+    border-left: 3px solid var(--c-accent-deco);
     padding: 28px 36px;
     margin: 0 0 28px;
   }
@@ -393,7 +394,7 @@
     content: "";
     display: inline-block;
     width: 6px; height: 6px;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
     margin-right: 8px;
     vertical-align: 2px;
   }

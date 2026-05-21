@@ -18,7 +18,8 @@
 
   :root {
     --c-primary:    {{COLOR_PRIMARY}};
-    --c-accent:     {{COLOR_ACCENT}};
+    --c-accent:      {{COLOR_ACCENT}};       /* text-safe accent (≥4.5:1 vs bg) */
+    --c-accent-deco: {{COLOR_ACCENT_DECO}};  /* decorative accent — original brand color, used on non-text dots/strips */
     --c-background: {{COLOR_BACKGROUND}};
     --c-surface:    {{COLOR_SURFACE}};
     --c-text:       {{COLOR_TEXT}};
@@ -65,7 +66,7 @@
     justify-content: space-between;
     gap: 16px;
   }
-  .ticker .acc { color: var(--c-accent); }
+  .ticker .acc { color: var(--c-accent-deco); }
 
   /* --- page shell ---------------------------------------------- */
   .page {
@@ -105,7 +106,7 @@
   .header-stamp .tag::before {
     content: "";
     width: 6px; height: 6px;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
     border-radius: 50%;
   }
 
@@ -272,7 +273,7 @@
   .callout {
     background: var(--c-paper);
     border: 1px solid var(--c-line);
-    border-left: 4px solid var(--c-accent);
+    border-left: 4px solid var(--c-accent-deco);
     padding: 24px 28px;
     margin: 0 0 24px;
   }
@@ -412,7 +413,7 @@
     display: flex;
     justify-content: space-between;
   }
-  .footer .acc { color: var(--c-accent); }
+  .footer .acc { color: var(--c-accent-deco); }
 
   /* --- print -------------------------------------------------- */
   @media print {

@@ -18,7 +18,8 @@
 
   :root {
     --c-primary:    {{COLOR_PRIMARY}};
-    --c-accent:     {{COLOR_ACCENT}};
+    --c-accent:      {{COLOR_ACCENT}};       /* text-safe accent (≥4.5:1 vs bg) */
+    --c-accent-deco: {{COLOR_ACCENT_DECO}};  /* decorative accent — original brand color, used on non-text dots/strips */
     --c-background: {{COLOR_BACKGROUND}};
     --c-surface:    {{COLOR_SURFACE}};
     --c-text:       {{COLOR_TEXT}};
@@ -65,7 +66,7 @@
     right: -60px; bottom: -100px;
     width: 320px; height: 320px;
     border-radius: 50%;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
     opacity: 0.95;
     pointer-events: none;
   }
@@ -87,7 +88,7 @@
     content: "";
     display: inline-block;
     width: 6px; height: 6px;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
     margin-right: 8px;
     vertical-align: 2px;
   }
@@ -216,7 +217,7 @@
     left: 0;
     top: 19px;
     width: 12px; height: 2px;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
   }
   ol.bullets > li::before {
     content: counter(bullet, decimal-leading-zero);
@@ -277,7 +278,7 @@
   .callout p + p { margin-top: 18px; }
   .callout p em {
     font-style: normal;
-    background: var(--c-accent);
+    background: var(--c-accent-deco);
     color: var(--c-primary);
     padding: 0 6px;
   }
@@ -416,7 +417,7 @@
     justify-content: space-between;
     align-items: center;
   }
-  .footer .mark { color: var(--c-accent); font-weight: 600; }
+  .footer .mark { color: var(--c-accent-deco); font-weight: 600; }
 
   /* --- print ------------------------------------------------- */
   @media print {

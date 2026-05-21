@@ -1,7 +1,7 @@
 ---
 name: briefme
 description: Generate a branded HTML brief from agent work — status updates, research findings, or client meeting talking points. Auto-detects client brand colors from `.claude/brand.json` in the repo. Use when the user runs `/briefme`, asks for a brief, status doc, research write-up, or client meeting talking points from the current conversation.
-argument-hint: "<status|meeting|research> [theme] [optional inline content]"
+argument-hint: "<status|meeting|research> [theme] [concise|standard|detailed] [optional inline content]"
 ---
 
 # briefme — Branded HTML brief generator
@@ -15,15 +15,21 @@ Turn the work we just did together into a polished, branded HTML document. Three
 ## Arguments
 
 - `$1` — mode: `status` | `meeting` | `research` (required)
-- `$2` — optional theme name (folder name under `themes/`). If `$2` matches an existing theme folder, treat it as the theme. Otherwise treat `$2` and onward as inline content.
-- `$3..` (or `$2..` if no theme) — optional inline content. If omitted, synthesize the brief from the recent conversation context.
+- `$2` — optional theme name (folder name under `themes/`). If `$2` matches an existing theme folder, treat it as the theme. Otherwise it's not a theme — move to the next slot.
+- `$3` — optional verbosity: `concise` | `standard` | `detailed`. Default is `standard` if not specified. If `$3` matches one of those, use it. Otherwise it's not a verbosity flag — treat `$3` onward as inline content.
+- Remaining args — optional inline content. If omitted, synthesize the brief from the recent conversation context.
+
+Args are positional and *each* slot is optional, but the order is: mode → theme → verbosity → content. The skill detects which is which by matching against known theme names and the two verbosity keywords.
 
 **Examples:**
 ```
 /briefme meeting
-/briefme meeting editorial
-/briefme status "Shipped the auth refactor, started on the dashboard widget"
-/briefme research bold "Finished competitive analysis on pricing pages..."
+/briefme meeting engineered
+/briefme meeting engineered concise
+/briefme status concise                              # no theme, concise verbosity
+/briefme research engineered detailed
+/briefme status "Shipped the auth refactor"          # no theme, no verbosity, inline content
+/briefme research engineered concise "Quick note: ..."
 ```
 
 ## Procedure
@@ -70,6 +76,7 @@ Brand schema (mirror `brand.example.json`):
   "url": "https://acme.com",
   "tagline": "Optional one-liner shown under the client name",
   "theme": "default",
+  "verbosity": "detailed",
   "colors": {
     "primary": "#0A2540",
     "accent": "#635BFF",
@@ -82,35 +89,88 @@ Brand schema (mirror `brand.example.json`):
 }
 ```
 
-The `theme` field is optional; omit it to be prompted each time (or always pass theme via the CLI arg).
+The `theme` field is optional; omit it to be prompted each time (or always pass theme via the CLI arg). The `verbosity` field is optional; default is `standard` if missing. Valid values: `concise`, `standard`, `detailed`.
 
 #### Color selection guidance
 
-The accent color is used for small UI elements that sit on the background: dots, tags, eyebrow text, code-header lang labels, link color. If the accent doesn't contrast against the background, the brief looks washed out and accessibility suffers.
+The accent color is used for small UI elements **including text** — card eyebrows, code-header `.lang` labels, link color, tag text, section-label markers. Because the accent carries text, it should hit **WCAG 4.5:1 against `background`**, not just 3:1.
 
-**When creating a new `brand.json`** (i.e., the file doesn't exist and the user agrees to set one up):
+##### When creating a new `brand.json`
 
-1. **Investigate the client's actual brand** before picking colors. Look at their website, search for "<client> brand guidelines" or "<client> color palette", and pull the canonical primary + secondary brand colors. Note the source in your reply so the user knows whether it's official or inferred.
-2. **Pick `primary` for hero/structural uses** — large blocks, ticker, footer, borders. Usually the client's darkest brand color (often deep navy, charcoal, or saturated brand hue). Must have ≥ 4.5:1 contrast against the background.
-3. **Pick `accent` for small element use on the background** — dots, chips, links, eyebrows. Must have **≥ 3:1 contrast against `background`** (WCAG non-text minimum). Aim for 4.5:1+ if it will carry text.
-4. **If the natural brand accent is too light** for the background (e.g. pastel mint, soft beige), do one of the following:
-   - Pick a *different* brand color that has better contrast (often the second or third in the palette is darker).
-   - Derive a darker variant by reducing lightness ~20–30% (HSL space). Note this clearly to the user: "I darkened the accent from #X to #Y for contrast — let me know if you'd prefer to keep the lighter brand value."
-5. **Surface the tradeoff to the user before writing the file.** Don't silently pick. One-line summary: which colors you selected, source, and any darkened variants.
+1. **Investigate the client's actual brand** before picking colors. Look at their website, search for "<client> brand guidelines" or "<client> color palette", and pull the canonical brand colors. Note the source in your reply so the user knows whether it's official or inferred.
+2. **Populate `colors.palette`** with 3–6 of the client's brand colors (hex values, full set). This becomes the pool of acceptable swap candidates if the chosen accent later fails contrast. Include the dark colors *and* the light ones — the agent picks per-context.
+3. **Pick `primary` for hero/structural uses** — ticker, footer, borders, large blocks. Usually the client's darkest brand color. Must have ≥ 4.5:1 contrast against `background`.
+4. **Pick `accent` for small element + text use** — dots, chips, links, eyebrows, code-header lang. **Must have ≥ 4.5:1 contrast against `background`.** If the most "brand-iconic" color (often a light mint, soft pastel, or pale tint) fails 4.5:1, pick a different color from `palette` rather than darkening — preserves brand authenticity.
+5. **Only derive a darker variant as a last resort** — e.g. when the brand truly has only two colors and one is the background. Note the derivation: "Derived `#Y` from `#X` (HSL lightness -25%) because no palette color hit 4.5:1."
+6. **Surface the tradeoff to the user before writing.** One-line summary: which colors you chose, the source, and whether any palette swap or derivation happened.
 
-**When loading an existing `brand.json`**:
+##### When loading an existing `brand.json`
 
-- Compute the contrast ratio of `accent` against `background` (WCAG relative luminance formula).
-- If it's below 3:1, do NOT silently render — warn the user once at the start: *"Heads up: accent `#X` has ~Y:1 contrast against background. Small UI bits (dots, tags, eyebrows) will look faded. Want me to derive a darker variant just for this brief?"*
-- If the user says yes, use a derived darker variant for this run only — do not modify `brand.json` without explicit permission.
+1. Compute the contrast ratio of `accent` against `background` (WCAG relative luminance formula).
+2. **If contrast ≥ 4.5:1, proceed silently** — no warning needed.
+3. **If contrast < 4.5:1, do NOT silently render.** Run the fallback chain *in this exact order*:
+   - **(a) Palette swap.** Walk `colors.palette` (if present). For each color, compute contrast vs. `background`. Pick the palette member that (i) passes 4.5:1, and (ii) is closest in hue to the original accent (so the brief still *feels* like the brand). If a palette swap succeeds, tell the user: *"Heads up — accent `#X` has ~Y:1 against background (below 4.5:1 for text). Using `#Z` from the brand palette for this run; it's a darker brand color that hits ~N:1 and stays in-brand. Want me to keep `#X` anyway?"*
+   - **(b) Derived darker variant.** If `palette` is missing or no palette member passes 4.5:1, derive a darker variant of the original accent (HSL lightness -20–30%). Tell the user: *"Heads up — accent `#X` has ~Y:1 against background. No brand-palette color hit 4.5:1, so I derived `#Z` (darker variant of your accent) for this run. Want me to keep `#X` anyway?"*
+4. **Whichever path runs, the swap is run-only.** Never modify `brand.json` without explicit user permission. If they prefer the original despite the contrast issue, use `#X` and move on — their call.
 
-**Defaults are already contrast-safe** — the fallback palette (`#0A2540` / `#635BFF` on white) passes both 3:1 and 4.5:1.
+##### Defaults are already contrast-safe
+
+The fallback palette (`#0A2540` primary / `#635BFF` accent on white) passes 4.5:1 cleanly.
 
 ### 4. Compose the body content
 
-Based on the chosen mode, structure the content. **Do not pad with filler.** If the conversation only has 3 substantive points, the brief has 3 cards — not 8.
+Based on the chosen mode AND chosen verbosity, structure the content.
 
-**Title rules (apply to all modes).** The `{{TITLE}}` is the *subject* of the brief, not the *type*. Do not include words like "status", "research", "brief", "report", "investigation", "findings", "update", or "summary" in the title — those are already shown in the mode tag and ticker. Title should be specific to the subject: ✅ "GTM missing parameters" / "Auth refactor & dashboard kickoff" / "Pricing page competitive analysis". ❌ "GTM missing parameters status update" / "Auth research findings". You may use `<em>` to add a 1–3 word secondary phrase (e.g. `Auth refactor <em>before pilot</em>`) — but the phrase still should not restate the mode.
+#### Verbosity
+
+**Default is `standard`** unless the user passed `concise` or `detailed` as an arg, or `brand.json` has a `"verbosity"` field set. The three levels are different rendering profiles, not different content — same source material, different filter.
+
+##### `standard` (default) — everyday use
+
+The sweet spot. Enough detail to be useful in a meeting or as an artifact you might forward, without burying the headline in three paragraphs of context.
+
+Aim for this in practice:
+- **1–2 short paragraphs per finding/card.** First paragraph carries the assertion + the key data point in `<code>`. Second (when present) adds the one piece of context the reader can't infer.
+- **Executive summary is 2–3 sentences** in the callout — what's the headline, what's the recommendation in one line.
+- **Cite real numbers in `<code>` spans.** Counts, percentages, file paths, event names. Don't paraphrase what's known.
+- **Source line is kept** — one line under each finding, mono-styled. Anchors the claim.
+- **No "considered and ruled out" tangent.** That's for `detailed`.
+- **No code excerpts unless one is genuinely load-bearing** for the finding (rare in standard).
+- **Recommendations are imperative + short rationale.** "**Approve v8 classifications** — converts the investigation from open to closed." One sentence, not a paragraph.
+
+##### `concise` — personal scan, quick status
+
+The reader is usually *you* and you already have the context. Strip to the load-bearing assertion + the key number.
+
+- **One short paragraph per finding/card** — headline plus one decisive number/qualifier. No two-sided framing.
+- **Callout collapses to one or two sentences.**
+- **`<code>` spans kept** for key numbers and identifiers.
+- **Source line is optional.** Include only if contested or load-bearing.
+- **Code excerpts omitted** unless the finding is *about* the code.
+- **Recommendations become short imperatives.** "Approve v8 classifications." / "Open direct_shop businessLine ticket if needed."
+
+##### `detailed` — client meetings, research deliverables, high-stakes handoff
+
+When you'll be reading FROM the brief in a discussion, or shipping it as a standalone artifact someone has to act on without you.
+
+- **2–4 paragraphs per finding/card.** Headline → why → how you know → what was considered and ruled out → what to do.
+- **Executive summary is 2–3 fuller sentences** with the headline AND the recommendation framing.
+- **Include the "considered and ruled out" thread** when it informs the conclusion. "We initially suspected the frontend was dropping values, but the v8 Rollup showed parity, so the gap moved upstream to..."
+- **Don't drop names, dates, tickets, or links.** "Wesley confirmed via Datadog requery on Apr 17."
+- **Code excerpts pull their weight** when findings are code-grounded (per the code-evidence rule below).
+- **Recommendations include rationale paragraphs.** Bolded directive + 1–2 sentences of explanation per item. Include conditional paths ("if X is a hard requirement, do Y, decision owner Z").
+
+##### What's the same across all three
+
+- Mode structure (status/meeting/research sections) is identical.
+- Card eyebrows, em-accented titles, h3 card-titles, theme rendering — all consistent.
+- **Filler is forbidden in all three.** If the conversation had 3 substantive findings, the brief has 3 — not 8 padded ones. **Never invent content.** Higher verbosity adds *real* context that exists in source material; it does not pad.
+
+In short: **concise = "say it once", standard = "say it clearly", detailed = "explain it fully".**
+
+**Title rules (apply to all modes).** The `{{TITLE}}` is the *subject* of the brief, not the *type*. Do not include words like "status", "research", "brief", "report", "investigation", "findings", "update", or "summary" in the title — those are already shown in the mode tag and ticker. Title should be specific to the subject: ✅ "GTM missing parameters" / "Auth refactor & dashboard kickoff" / "Pricing page competitive analysis". ❌ "GTM missing parameters status update" / "Auth research findings". **Default to wrapping the last 1–3 words of the title in `<em>`** for a typographic accent — themes style this consistently and it's an important visual signal. Example: `<h1 class="title">Auth refactor <em>before pilot</em></h1>`. The em phrase still must not restate the mode.
+
+**Card eyebrow nudge.** When generating cards, **default to including a 1–2 word `<p class="card-eyebrow">` label** on each card (e.g. "Artifacts", "Findings", "Risk", "Next decision"). Eyebrows are styled with accent color and serve as quick scanability tags for cards. Omit only when the eyebrow would be redundant with the card title or section label.
 
 #### `status` mode — dense work log
 Sections, in this order, **omit any that have no content**:
@@ -160,17 +220,43 @@ The same code-evidence block is also useful in `status` mode when reporting on w
 
 ### 5. Render the HTML
 
-Read `TEMPLATE_PATH` (the theme's `template.html`, resolved in step 2). It contains a complete design shell with CSS custom properties for brand colors and a single `<!-- BODY -->` placeholder.
+**Critical: do not hand-write or paraphrase the template.** You must read the theme's `template.html` from disk verbatim and only substitute the listed tokens. Hand-rolling a "similar" CSS is wrong — the themes carry the design (specific Google Fonts, panel styles, ornaments, code-block treatments) that make briefs visually consistent. If you rewrite the CSS, every brief looks different and the theme system is meaningless.
 
-Replace the following tokens in the template:
-- `{{CLIENT_NAME}}` — from brand.json
-- `{{CLIENT_URL}}` — from brand.json or `REMOTE_URL` (linkify if URL, else plain text)
-- `{{TAGLINE}}` — from brand.json (or empty string)
-- `{{MODE_LABEL}}` — `Status Brief` | `Meeting Brief` | `Research Brief`
-- `{{TITLE}}` — short title you generate based on content (e.g. "Auth refactor & dashboard kickoff")
-- `{{DATE}}` — today's date, formatted `Month D, YYYY` (e.g. "May 20, 2026")
-- `{{COLOR_PRIMARY}}`, `{{COLOR_ACCENT}}`, `{{COLOR_BACKGROUND}}`, `{{COLOR_SURFACE}}`, `{{COLOR_TEXT}}`, `{{COLOR_MUTED}}`, `{{COLOR_BORDER}}` — from brand.json (use defaults if not set)
-- `<!-- BODY -->` — replace with your composed body HTML
+The exact procedure:
+
+1. **Read the template file** at `TEMPLATE_PATH` (resolved in step 2) using the Read tool. This gives you the complete HTML document — `<!DOCTYPE>` through `</html>` — including all `<link>` tags for fonts, the full `<style>` block, and the body chrome.
+2. **Do not modify the CSS or the chrome.** Specifically:
+   - Do not change the Google Fonts `<link>` tags or the `--f-sans` / `--f-mono` / `--f-display` / `--f-serif` font stacks.
+   - Do not simplify, minify, or reformat the CSS.
+   - Do not drop CSS classes you think are unused — other modes/themes may use them.
+   - Do not invent new classes; only use ones the theme already defines (see `themes/README.md`).
+3. **Substitute these tokens** by exact string replacement (case-sensitive, with double curly braces):
+   - `{{CLIENT_NAME}}` — from brand.json
+   - `{{CLIENT_URL}}` — from brand.json or `REMOTE_URL` (linkify if URL, else plain text)
+   - `{{TAGLINE}}` — from brand.json (or empty string)
+   - `{{MODE_LABEL}}` — `Status Brief` | `Meeting Brief` | `Research Brief`
+   - `{{TITLE}}` — short title you generate based on content (e.g. "Auth refactor & dashboard kickoff")
+   - `{{DATE}}` — today's date, formatted `Month D, YYYY` (e.g. "May 20, 2026")
+   - `{{COLOR_PRIMARY}}`, `{{COLOR_ACCENT}}`, `{{COLOR_ACCENT_DECO}}`, `{{COLOR_BACKGROUND}}`, `{{COLOR_SURFACE}}`, `{{COLOR_TEXT}}`, `{{COLOR_MUTED}}`, `{{COLOR_BORDER}}` — from brand.json (use defaults if not set). See the two-tier accent rule below for `{{COLOR_ACCENT}}` vs `{{COLOR_ACCENT_DECO}}`.
+
+**Two-tier accent rule.** Themes use two accent variables:
+- `--c-accent` carries text — card eyebrows, code-header `.lang` labels, link color, counter numbers. Must hit ≥ 4.5:1 vs background.
+- `--c-accent-deco` is for decoration only — dots, borders, accent strips, highlight backgrounds where dark text sits on top. Can be lighter; preserves brand identity.
+
+Substitution rule when rendering:
+- **If brand accent passes 4.5:1:** substitute the same brand accent for *both* `{{COLOR_ACCENT}}` and `{{COLOR_ACCENT_DECO}}`. No special-casing needed.
+- **If brand accent fails 4.5:1 (contrast fallback fired in step 3):** substitute the *contrast-safe value* (palette swap or derived darker variant) into `{{COLOR_ACCENT}}`, and substitute the *original light brand color* into `{{COLOR_ACCENT_DECO}}`. This keeps the original brand color visible on dots/strips while text uses the readable darker variant.
+
+So for Stitch Fix mint `#86C8BC` (1.91:1 — fails), a run might substitute `#3A8073` (derived darker) into `{{COLOR_ACCENT}}` and keep `#86C8BC` in `{{COLOR_ACCENT_DECO}}`. Result: text reads cleanly, mint dots/strips stay vibrant.
+4. **Replace the `<!-- BODY -->` placeholder** with your composed body HTML (the content from step 4). Replace the comment marker exactly once with your body content.
+5. **Sanity check before writing.** Confirm the output:
+   - Starts with `<!DOCTYPE html>`
+   - Contains the `<link rel="stylesheet" href="https://fonts.googleapis.com/...">` tag the template had (themes load specific fonts; if this is missing, you regenerated the template instead of substituting into it)
+   - Contains the full `<style>` block from the template (typically 200+ lines unminified)
+   - Has no remaining `{{TOKEN}}` placeholders or `<!-- BODY -->` markers
+6. **Write the file** using the Write tool.
+
+If you find yourself writing CSS rules, stop — you are doing it wrong. Re-read the template file and substitute into it.
 
 ### 6. Write and open
 
