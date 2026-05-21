@@ -1,7 +1,7 @@
 ---
 name: briefme
 description: Generate a branded HTML brief from agent work — status updates, research findings, or client meeting talking points. Auto-detects client brand colors from `.claude/brand.json` in the repo. Use when the user runs `/briefme`, asks for a brief, status doc, research write-up, or client meeting talking points from the current conversation.
-argument-hint: "<status|meeting|research> [theme] [concise|standard|detailed] [optional inline content]"
+argument-hint: "<status|meeting|research|retheme> [theme] [concise|standard|detailed] [optional inline content or source-file for retheme]"
 ---
 
 # briefme — Branded HTML brief generator
@@ -14,7 +14,7 @@ Turn the work we just did together into a polished, branded HTML document. Three
 
 ## Arguments
 
-- `$1` — mode: `status` | `meeting` | `research` (required)
+- `$1` — mode: `status` | `meeting` | `research` | `retheme` (required)
 - `$2` — optional theme name (folder name under `themes/`). If `$2` matches an existing theme folder, treat it as the theme. Otherwise it's not a theme — move to the next slot.
 - `$3` — optional verbosity: `concise` | `standard` | `detailed`. Default is `standard` if not specified. If `$3` matches one of those, use it. Otherwise it's not a verbosity flag — treat `$3` onward as inline content.
 - Remaining args — optional inline content. If omitted, synthesize the brief from the recent conversation context.
@@ -30,6 +30,10 @@ Args are positional and *each* slot is optional, but the order is: mode → them
 /briefme research engineered detailed
 /briefme status "Shipped the auth refactor"          # no theme, no verbosity, inline content
 /briefme research engineered concise "Quick note: ..."
+
+# Re-theme an existing brief (same content, new theme):
+/briefme retheme magazine .claude/briefs/research-engineered-2026-05-20-1700.html
+/briefme retheme swiss /Users/wes.burch/.../status-default-...html
 ```
 
 ## Procedure
@@ -192,6 +196,40 @@ Order cards by what the user would discuss first → last in a meeting (wins →
 1. **Executive summary** — 2–3 sentences in a highlighted callout box.
 2. **Findings** — numbered list of findings, each with: a title, 1–2 paragraphs of detail, **optional code evidence** (see below — prefer to include when the finding is about code behavior), and an optional source/citation line.
 3. **Recommendations** — ordered list of next actions.
+
+#### `retheme` mode — re-render an existing brief in a different theme
+
+A maintenance operation: take a previously generated brief HTML file and re-render the same content through a different theme. Content is preserved verbatim; only the visual presentation changes.
+
+**Invocation pattern:** `/briefme retheme <new-theme> <source-file-path>`
+
+The verbosity arg is **not used** in retheme mode — the source's existing detail level is preserved as-is. If you want to change verbosity, re-run the original mode against the live conversation context instead.
+
+**Procedure (overrides the standard step 4 — Compose body content):**
+
+1. Verify `<source-file-path>` exists and looks like a briefme-generated HTML (must contain a `<style>` block with `--c-accent` and a `<div class="body">…</div>` section). If it doesn't, tell the user and stop.
+2. Extract these values from the source file using string matching:
+   - **Title** — full inner HTML of `<h1 class="title">…</h1>` (preserve any `<em>` tags inside).
+   - **Tagline** — inner text of `<p class="tagline">…</p>`.
+   - **Mode label** — text after the em-dash in the `<title>…</title>` head tag (e.g. `Stitch Fix — Research Brief` → `Research Brief`). Also detect the original mode (`status`/`meeting`/`research`) by matching against the three known labels for the output filename.
+   - **Date** — preserve the date as it appears in the source. Look for it in the header chrome (each theme has a date display); easiest signal is the YYYY-MM-DD in the source filename, converted back to "Month D, YYYY" format. If the filename doesn't have a date, use today's.
+   - **Body content** — everything between the first `<div class="body">` (or `<div class="body">\s*<!-- BODY -->\s*</div>` boundary if present) and its matching closing `</div>` followed by `</main>`.
+   - **Brand context** — re-load `<REPO_ROOT>/.claude/brand.json` for the project the source lives in (walk up from the source file's directory to find `.claude/brand.json`). Re-evaluate contrast and resolve the two-tier accent (per step 3) using *current* brand.json values, NOT the colors baked into the source. This way, if brand.json has been updated since the original was generated, the retheme reflects the latest brand state.
+3. Confirm the resolved theme `<new-theme>` exists in `themes/` next to this SKILL.md. If not, fall back to `default` and tell the user.
+4. Skip directly to step 5 (Render the HTML), substituting:
+   - Extracted client name, URL, tagline, title, mode label, date (per above).
+   - Brand colors from the re-loaded brand.json (with two-tier accent applied as usual).
+   - Body content placed at the `<!-- BODY -->` marker verbatim.
+5. **Output filename:** `<original-mode>-<new-theme>-YYYY-MM-DD-HHMM.html` in the same `.claude/briefs/` directory as the source. Use today's timestamp for HHMM so it doesn't clash with the source.
+6. Confirm to the user with: the new path, the source it was re-themed from, and the new theme used.
+
+**What retheme does NOT do:**
+- Does not regenerate content. If the source was concise, the retheme stays concise.
+- Does not change the mode (status stays status, etc.).
+- Does not modify the source file.
+- Does not pull new code excerpts even if the source already had them — they pass through unchanged.
+
+If the user passes inline content alongside retheme args, ignore it with a warning — retheme operates on the source file's body only.
 
 **Code evidence in findings.** When a research finding is grounded in code you've actually read in this session, **default to including a short code excerpt as evidence** under the finding's narrative. This is the difference between a finding that asserts something and one that proves it.
 
