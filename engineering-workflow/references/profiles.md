@@ -93,6 +93,85 @@ root/project supervisor → task/dependency graph → task coordinators
   for the whole graph — `project-knowledge` reconciles across them later if
   it finds the same topic recurring.
 
+### Optional: plan-review loop before implementation
+
+For architecture-heavy or high-risk work, FULL may run a plan-review loop
+before any implementer starts — not by default, only when the signals above
+(architecture decisions, contested/high-stakes design, long-running work)
+are strong enough to warrant it:
+
+```
+primary planner → independent architecture critic → primary planner revision
+  → implementation-readiness reviewer → human approval
+```
+
+- **Primary planner** (`capable`) drafts the plan/decomposition.
+- **Architecture critic** (`capable`, escalate to `frontier` when justified)
+  is a separate instance from the planner — never the same agent reviewing
+  its own plan. It looks specifically for: missing failure modes, unverified
+  architectural assumptions, persistence/restart problems, race
+  conditions/concurrency risks, duplicated state ownership, unclear
+  component boundaries, missing test coverage, upstream/fork maintenance
+  hazards, scope creep, and unresolved product/requirements ambiguity.
+- The **primary planner** revises against the critic's findings.
+- **Implementation-readiness reviewer** (`capable`, escalate to `frontier`
+  when justified) asks exactly one question: *can independent
+  implementation agents execute this plan phase-by-phase without inventing
+  major architectural decisions?* If no, the plan returns to the primary
+  planner for revision — this is a loop back to the critic step, not a
+  one-shot gate.
+- **Human approval** is the exit condition. Implementation does not start
+  until a human has approved the plan this loop produced.
+
+#### Optional: parallel independent planning
+
+For especially difficult or high-risk architecture, the primary-planner step
+above may itself fan out into two independent planners synthesized by a
+third pass:
+
+```
+Planner A ─┐
+           ├→ synthesis/review
+Planner B ─┘
+```
+
+Do not make this the default — most FULL tasks get one planner. Reach for
+parallel planning only when the architecture is contested or high-stakes
+enough that two independently-reasoned drafts are worth the cost, the same
+bar as reaching for the escalation reviewer.
+
+### Optional: specialized review gates for high-risk phases
+
+After a phase's deterministic verification and its normal independent
+review, FULL may insert a specialized reviewer when that phase carries
+unusual risk — concurrency/state-machine correctness, security/auth,
+persistence/recovery, schema/data migrations, performance, distributed
+systems, or destructive infrastructure changes:
+
+```
+implementer → deterministic verification → general reviewer
+  → specialized reviewer (e.g. state-machine/concurrency)
+  → repair if needed → deterministic verification (again)
+  → relevant reviewers (again) → approved
+```
+
+- The specialized reviewer (`references/roles.md`) is a separate instance
+  from the general reviewer, receives the same packet the Independent
+  reviewer contract defines, and judges only its named risk area — it does
+  not replace the general reviewer.
+- Tier: `capable` by default, escalate to `frontier` when the specialized
+  area itself turns out to be the hard, contested part of the review.
+- A specialized BLOCKING finding routes to `FIXING` exactly like any other
+  BLOCKING finding, and verification reruns exactly per
+  `references/state-machine.md` — this does not add a new state.
+- Use only when the phase's actual risk warrants it, not as a routine sweep
+  on every phase of every full task.
+
+**Governing principle for both mechanisms above:** every additional loop
+must answer a different question or incorporate new evidence. Repeating
+equivalent implementation/review passes without a distinct objective is
+discouraged — do not add generic repeated "dev sweeps."
+
 ## Downgrading mid-task
 
 A `full` that turns out to be one implementer with no real parallelism can

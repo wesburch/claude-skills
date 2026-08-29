@@ -60,8 +60,18 @@ reasoning-effort guidance.
 | Verifier | `deterministic` (+ `visual_capable` for browser/visual judgment) | all |
 | Independent reviewer | `capable` | standard, full |
 | Escalation reviewer | `frontier` | standard/full, on escalation only |
+| Architecture critic, implementation-readiness reviewer, specialized phase reviewer | `capable`, escalate to `frontier` when justified | full only, optional |
 
 Quick skips coordinator and reviewer entirely — see `references/profiles.md`.
+
+FULL has two further optional mechanisms it may reach for on genuinely
+difficult or high-risk work: a plan-review loop before implementation starts,
+and specialized review gates for high-risk phases. Neither is a default for
+every full task — see `references/profiles.md` for the loops themselves and
+`references/roles.md` for the roles they use. The governing principle for
+both: **every additional loop must answer a different question or
+incorporate new evidence — repeating equivalent implementation/review passes
+without a distinct objective is discouraged.**
 
 ## The core loop
 

@@ -120,6 +120,45 @@ than the implementer/reviewer used, specifically for a second, independently-
 reasoned opinion on a hard case. This is the one place in the workflow where
 that's worth the cost.
 
+## Optional FULL-only roles
+
+These three exist only for FULL's optional plan-review loop and specialized
+review gates (`references/profiles.md`) — not used in quick or standard, and
+not mandatory even in full. Reach for them only when a phase's actual
+difficulty or risk warrants it; see `profiles.md`'s governing principle
+before adding one.
+
+### Architecture critic — `capable`, escalate to `frontier` when justified — optional, full only
+
+A separate instance from the primary planner — never the planner reviewing
+its own plan. Looks specifically for: missing failure modes, unverified
+architectural assumptions, persistence/restart problems, race
+conditions/concurrency risks, duplicated state ownership, unclear component
+boundaries, missing test coverage, upstream/fork maintenance hazards, scope
+creep, and unresolved product/requirements ambiguity. Produces findings for
+the planner to revise against — it does not rewrite the plan itself.
+
+### Implementation-readiness reviewer — `capable`, escalate to `frontier` when justified — optional, full only
+
+Answers exactly one question: *can independent implementation agents execute
+this plan phase-by-phase without inventing major architectural decisions?*
+A "no" returns the plan to the primary planner for revision. Does not
+evaluate architecture quality itself — that's the architecture critic's job;
+this role only checks whether the (already-critiqued) plan is concrete
+enough to hand to implementers.
+
+### Specialized phase reviewer — `capable`, escalate to `frontier` when justified — optional, full only
+
+A separate instance from the general independent reviewer, engaged after
+normal review for a phase with unusual risk in one specific area:
+concurrency/state-machine correctness, security/auth, persistence/recovery,
+schema/data migrations, performance, distributed systems, or destructive
+infrastructure changes. Receives the same packet the Independent reviewer
+contract defines and judges only its named risk area — it supplements the
+general reviewer's verdict, it does not replace it. A specialized BLOCKING
+finding follows the same `FIXING` → re-verification path as any other
+BLOCKING finding.
+
 ## Cross-cutting separation rules
 
 - The reviewer may never be the implementer of the diff under review. Reuse
