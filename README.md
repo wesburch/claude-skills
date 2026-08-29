@@ -200,34 +200,46 @@ Describe what Claude should do when this skill is invoked.
 
 ### Adding Your New Skill
 
-1. **Create the skill directory:**
-   ```bash
-   cd ~/claude-skills
-   mkdir my-new-skill
-   ```
+**Scaffold it:**
+```bash
+~/claude-skills/scripts/new-skill.sh my-new-skill
+```
+Creates `my-new-skill/SKILL.md` with the frontmatter above pre-filled and
+`TODO` placeholders for the rest. Refuses to run if `my-new-skill/` already
+exists, and never touches any other skill.
 
-2. **Write the SKILL.md:**
-   ```bash
-   # Create your skill prompt
-   vi my-new-skill/SKILL.md
-   ```
+Options:
+- `-d, --description TEXT` — fill in the description field directly instead of a TODO
+- `-r, --references` — also create `my-new-skill/references/`, for a skill whose
+  `SKILL.md` will route to supporting docs (see `engineering-workflow/references/`
+  or `wiki/references/` for examples of the pattern)
+- `-h, --help` — usage
 
-3. **Install it:**
+Then:
+1. **Fill in `SKILL.md`** — description, argument-hint, and steps.
+2. **Install it:**
    ```bash
    ~/claude-skills/scripts/install.sh
    ```
    Symlinks it into both `~/.claude/skills/` and `~/.codex/skills/` automatically.
-
-4. **Test it:**
-   Open Claude Code and run `/my-new-skill`
-
-5. **Commit and push:**
+3. **Test it:** open Claude Code and run `/my-new-skill`
+4. **Commit and push:**
    ```bash
    cd ~/claude-skills
    git add my-new-skill/
    git commit -m "Add my-new-skill"
    git push
    ```
+
+<details>
+<summary>Doing it by hand instead of scripts/new-skill.sh</summary>
+
+```bash
+cd ~/claude-skills
+mkdir my-new-skill
+vi my-new-skill/SKILL.md   # write the frontmatter + prompt yourself
+```
+</details>
 
 ## Skill Development Tips
 
