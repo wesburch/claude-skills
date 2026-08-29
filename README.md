@@ -16,38 +16,84 @@ Global skills are custom commands (invoked with `/skill-name`) that extend Claud
    git clone git@github.com:wesburch/claude-skills.git
    ```
 
-2. **Symlink skills into Claude's config:**
+2. **Run the installer:**
    ```bash
-   cd ~/.claude/skills
-
-   # Link individual skills
-   ln -s ~/claude-skills/spec spec
-
-   # Or link all skills at once
-   for skill in ~/claude-skills/*/; do
-     skill_name=$(basename "$skill")
-     [[ "$skill_name" == "commands" ]] && continue
-     ln -s "$skill" "$skill_name"
-   done
+   ~/claude-skills/scripts/install.sh
    ```
+   This symlinks every skill directory (one with a `SKILL.md`) into
+   `~/.claude/skills/` and `~/.codex/skills/`, and every file in `commands/`
+   into `~/.claude/commands/`. It's idempotent and non-destructive — safe to
+   rerun any time (e.g. after `git pull` or adding a new skill). It never
+   overwrites a real file or directory; if something else already occupies a
+   target path, it's reported as a conflict for you to resolve by hand
+   instead of being clobbered.
 
-3. **Symlink slash commands into Claude's config:**
+3. **Verify installation:**
    ```bash
-   cd ~/.claude/commands
-
-   for cmd in ~/claude-skills/commands/*.md; do
-     ln -s "$cmd" "$(basename "$cmd")"
-   done
+   ~/claude-skills/scripts/doctor.sh
    ```
+   Checks that every skill/command in this repo is correctly symlinked into
+   Claude and Codex, and that the repo's git state is clean and in sync with
+   `origin`. Exits non-zero if anything needs attention. It only checks
+   skills defined in this repo — it doesn't know about unrelated skills
+   installed some other way (see [Duplicated/managed elsewhere](#a-note-on-other-skills-on-this-machine)
+   below).
 
-4. **Verify installation:**
-   ```bash
-   ls -la ~/.claude/skills
-   ls -la ~/.claude/commands
-   ```
-   You should see symlinks pointing to `~/claude-skills/`
+<details>
+<summary>What the installer does manually, if you'd rather not run a script</summary>
+
+```bash
+# Skills
+cd ~/.claude/skills
+for skill in ~/claude-skills/*/; do
+  skill_name=$(basename "$skill")
+  [[ "$skill_name" == "commands" || "$skill_name" == "scripts" ]] && continue
+  ln -s "$skill" "$skill_name"
+done
+
+# Same again, but into ~/.codex/skills instead of ~/.claude/skills
+
+# Slash commands
+cd ~/.claude/commands
+for cmd in ~/claude-skills/commands/*.md; do
+  ln -s "$cmd" "$(basename "$cmd")"
+done
+```
+</details>
+
+## Codex (GPT) Installation
+
+Codex reads skills from `~/.codex/skills/<name>/SKILL.md` and slash commands from
+`~/.codex/prompts/*.md`.
+
+```bash
+# 1. Skills — auto-trigger on shape (wiki, spec, briefme, ...)
+#    scripts/install.sh does this for every skill in this repo, Codex included.
+~/claude-skills/scripts/install.sh
+
+# 2. Slash commands — /wiki-ingest, /wiki-query, /wiki-lint
+#    These are generated wrapper prompts (not symlinks), so they aren't
+#    managed by install.sh. Only needs to be (re-)run if the wiki skill's
+#    sub-command names change.
+mkdir -p ~/.codex/prompts
+for op in ingest query lint; do
+  printf 'Use the `wiki` skill. Read `~/.codex/skills/wiki/SKILL.md`, then follow\n`~/.codex/skills/wiki/references/%s.md` in full against the wiki at\n`~/Documents/MyProjects/wiki/`.\n\nArgument: $ARGUMENTS\n' "$op" > ~/.codex/prompts/wiki-$op.md
+done
+```
+
+Verify with:
+```bash
+cd ~/claude-skills && codex exec --sandbox read-only --skip-git-repo-check \
+  "List the exact names of every skill available to you, one per line."
+```
 
 ## Available Skills
+
+### `wiki` (Codex skill + `/wiki-*` prompts)
+**Description:** Ingest, query, and lint the personal wiki at `~/Documents/MyProjects/wiki/`.
+`SKILL.md` routes to `references/{ingest,query,lint}.md`. Kept current with the wiki's own
+`CLAUDE.md` — no `tags:` frontmatter, `make reindex` (= `qmd update` + `qmd embed`), and
+category `index.md` maps must be updated on write.
 
 ### `/wiki-query` - Query the Wiki
 **Description:** Answer a question from the personal knowledge base at `~/Documents/MyProjects/wiki/`.
@@ -166,11 +212,11 @@ Describe what Claude should do when this skill is invoked.
    vi my-new-skill/SKILL.md
    ```
 
-3. **Symlink it:**
+3. **Install it:**
    ```bash
-   cd ~/.claude/skills
-   ln -s ~/claude-skills/my-new-skill my-new-skill
+   ~/claude-skills/scripts/install.sh
    ```
+   Symlinks it into both `~/.claude/skills/` and `~/.codex/skills/` automatically.
 
 4. **Test it:**
    Open Claude Code and run `/my-new-skill`
@@ -213,27 +259,26 @@ Since this is a git repository, keeping skills in sync is simple:
 # On any machine
 cd ~/claude-skills
 git pull
-
-# If you added new skills, symlink them
-cd ~/.claude/skills
-ln -s ~/claude-skills/new-skill new-skill
+./scripts/install.sh   # picks up any newly added skills/commands
 ```
 
 ## Troubleshooting
 
-### Skill not appearing in Claude Code
+Run the doctor script first — it checks everything below in one pass:
 
-1. Check the symlink exists:
-   ```bash
-   ls -la ~/.claude/skills
-   ```
+```bash
+~/claude-skills/scripts/doctor.sh
+```
 
-2. Verify the symlink target is correct:
+### Skill not appearing in Claude Code or Codex
+
+1. Check the symlink exists and points into this repo:
    ```bash
    readlink ~/.claude/skills/skill-name
+   readlink ~/.codex/skills/skill-name
    ```
-
-3. Ensure `SKILL.md` exists:
+2. If missing or wrong, rerun `~/claude-skills/scripts/install.sh`.
+3. Ensure `SKILL.md` exists and is non-empty:
    ```bash
    cat ~/claude-skills/skill-name/SKILL.md
    ```
@@ -243,6 +288,15 @@ ln -s ~/claude-skills/new-skill new-skill
 1. Check the SKILL.md frontmatter is properly formatted (YAML between `---`)
 2. Verify the `name:` field matches the directory name
 3. Test the skill with different arguments to see how Claude interprets them
+
+### A note on other skills on this machine
+
+`~/.claude/skills/` and `~/.codex/skills/` may contain skills that did **not**
+come from this repo — e.g. skills installed via a Claude Code plugin
+marketplace, or third-party skills pulled in by a separate skill-installer
+tool (tracked in its own lockfile, not this repo's git history). `install.sh`
+and `doctor.sh` only ever touch/check names that exist as a directory with a
+`SKILL.md` in *this* repo, so they won't interfere with those.
 
 ## License
 
