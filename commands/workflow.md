@@ -1,26 +1,16 @@
-Run a task through the `engineering-workflow` Skill — quick/standard/full
-profiles, role-based implementer/verifier/reviewer loop, capability-tier
-model routing, verification-before-review, repair loops, escalation, and a
-knowledge handoff at completion.
+Run the task through `engineering-workflow`.
 
-## Steps
+1. Read `~/.claude/skills/engineering-workflow/SKILL.md`.
+2. Treat an initial `quick`, `standard`, `full`, or `auto` as a profile override;
+   the remaining arguments are the task. Otherwise use the entire argument as
+   the task and select a profile from its risk and dependencies.
+3. Follow the entrypoint, including any existing project configuration. Load
+   references only at the decision points it names. Do not preload every
+   reference, spawn a fixed role roster, or require a knowledge artifact.
 
-1. Read `~/.claude/skills/engineering-workflow/SKILL.md` in full.
-2. Parse the argument below: if the first token is `quick`, `standard`,
-   `full`, or `auto`, it's a profile override; the rest (or all of it, if no
-   such token) is the task description.
-3. Follow SKILL.md's "Always first" step to load project config
-   (`references/project-config.md`) and resolve the runtime
-   (`references/runtime-adapter.md`), then run the profile's flow from
-   `references/profiles.md`, dispatching roles per `references/roles.md`
-   and `references/model-routing.md`, tracking state per
-   `references/state-machine.md`, and producing a knowledge handoff per
-   `references/knowledge-handoff.md` at completion.
-
-## Output
-
-Report the profile used (recommended, and why, or the override given), the
-roles dispatched, the final state, and whether a knowledge handoff was
-produced.
+Report the chosen profile briefly, then complete the task. Finish with the actual
+change, checks, review outcome when required, and remaining limitations. Advice
+or audit requests remain advice or audit; invoking the command does not turn
+them into implementation permission.
 
 $ARGUMENTS

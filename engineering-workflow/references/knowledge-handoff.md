@@ -1,66 +1,29 @@
-# Knowledge handoff
+# Optional knowledge handoff
 
-`engineering-workflow` produces raw material. It never reconciles,
-deduplicates, or writes durable knowledge itself — that's
-[project-knowledge](../../project-knowledge/SKILL.md)'s entire job. This
-file defines the contract between the two: what gets handed off, when, and
-where it's recorded.
+Capture a concrete reusable decision, discovery, or lesson at meaningful
+completion. Routine tasks produce no handoff unless the project requires one.
+Do not search the knowledge base or load another skill just to decide whether
+there is an obvious candidate; final significance/deduplication belongs to
+[project-knowledge](../../project-knowledge/SKILL.md).
 
-## Why this split exists
+Preserve its existing field contract; omit empty fields:
 
-The implementer/coordinator producing this handoff should not spend time
-searching the existing knowledge base, deduplicating against it, or writing
-polished documentation — that's a different kind of work, done by a
-different (and cheaper) pass, and doing it inline would slow builders down
-for no benefit to the task at hand. See `project-knowledge`'s own
-`reconciliation.md` for what happens to this material next.
-
-## When
-
-At meaningful task completion — normally when a task reaches `APPROVED`
-(`state-machine.md`). Not at every verification pass, not at every repair
-round. A `quick` task usually produces nothing here at all; most small
-changes have no candidate worth recording (see `project-knowledge`'s
-`significance.md` for the filter that ultimately decides this — the
-implementer's job here is just to flag candidates, not to pre-judge them).
-
-## Where
-
-One more append-only section in the same task artifact used for evidence and
-review (`state-machine.md`), not a separate file or mechanism. Written once,
-at completion.
-
-## Fields
-
-Don't force this exact schema where a project already has a cleaner
-convention — but absent one, this is the default shape:
-
-| Field | What goes here |
+| Field | Content |
 |---|---|
-| `task` | Task ID / pointer to the task artifact. |
-| `project` | Which project/repo this is. |
-| `profile` | Which profile ran (`quick`/`standard`/`full`). |
-| `significance_hint` | The implementer's own guess at whether this is worth durable knowledge — `none` / `maybe` / `likely` — and one line why. Not a decision; `project-knowledge` decides. |
-| `candidate_decisions` | Anything intentionally chosen during this task, with the alternatives considered if known. |
-| `candidate_lessons` | Anything a future task would otherwise have to rediscover. |
-| `architecture_impacts` | What this task changed about how the system is shaped, if anything. |
-| `unexpected_findings` | Anything surprising that came up, whether or not it was the point of the task. |
-| `future_implications` | What this task sets up, constrains, or blocks for later work. |
-| `relevant_files` | Files a reconciliation pass would need to look at. |
-| `evidence_references` | Pointers into the task artifact's own evidence/review sections — not copies of them. |
+| `task`, `project`, `profile` | Task reference, repo, profile used |
+| `significance_hint` | none / maybe / likely, with brief reason; not a reconciliation decision |
+| `candidate_decisions` | Actual decisions and known alternatives/rationale |
+| `candidate_lessons` | Reusable findings backed by evidence |
+| `architecture_impacts`, `unexpected_findings`, `future_implications` | Only concrete relevant observations |
+| `relevant_files`, `evidence_references` | Source pointers, not repeated transcripts |
 
-Leave a field empty rather than pad it. A handoff with five empty fields and
-one real `candidate_lessons` entry is doing its job; a handoff where every
-field got filled in because the schema asked for it is noise for the next
-pass to wade through.
+Append to an existing task artifact when present. Otherwise use a compact section
+in the completion report, or persist under configured `task_store` when a durable
+handoff is needed. No full task log is required just to retain one useful lesson.
+Do not invent rationale or force every field to be populated.
 
-## What this is not
-
-- Not a decision to write durable knowledge — `significance_hint` is a
-  hint, not a verdict.
-- Not a place to repeat the full task history — that lives in the task
-  artifact's own evidence/transition sections; this handoff points at it,
-  it doesn't duplicate it.
-- Not a blocking step. Producing the handoff is part of reaching
-  `APPROVED`; reconciling it is not, unless the project config explicitly
-  sets a knowledge gate for this milestone.
+Reconciliation stays outside the implementation path. Leave the packet for later
+or dispatch project-knowledge when that action is within scope and supported by
+the runtime. Do not start an untracked background process. A reconciliation
+failure does not block completion unless an explicit project milestone gate says
+otherwise. Engineering-workflow does not write reconciled wiki/knowledge entries.

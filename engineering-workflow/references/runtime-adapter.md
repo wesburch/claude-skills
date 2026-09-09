@@ -1,79 +1,65 @@
-# Runtime adapter
+# Runtime adapters
 
-The workflow's roles, states, and loop must survive a future move off
-today's runtime. Every place else in this Skill talks about "spawning" or
-"dispatching" an agent in the abstract — this file is the only place that
-should ever name a concrete runtime, and it names two: Herdr (preferred when
-present) and this CLI's own native agent dispatch (the fallback, and often
-simpler when Herdr isn't running).
+Resolve only when dispatching: explicit user/project choice, then suitable
+capabilities in the active host. Prefer native dispatch when it meets the task.
+Installed binaries do not prove authentication, model access, or active sessions.
+Do not install a proxy or change global defaults just to satisfy a routing table.
 
-## The abstract operations
+Every adapter must start a scoped assignment, deliver its packet, await or
+inspect completion, collect results, and stop/cancel when necessary. Completion
+means an actual result and successful process/tool status, not merely a pane
+that looks idle. Keep the user informed during long work; use notifications or
+bounded waits rather than frequent polling.
 
-Six operations cover everything a profile needs from a runtime:
+## Native agents
 
-| Operation | Does |
-|---|---|
-| `spawnAgent(role, task)` | Start a new agent instance holding one role for one task. |
-| `sendTask(agent, context)` | Give a running/new agent its task context (spec, packet, prior state). |
-| `awaitCompletion(agent)` | Block or poll until the agent reports done. |
-| `inspectStatus(agent)` | Check whether an agent is running, idle, done, or stuck, without waiting. |
-| `collectResult(agent)` | Retrieve the agent's output/verdict/artifact. |
-| `stopAgent(agent)` | Tear down an agent instance that's done or no longer needed. |
+Use the host's documented dispatch controls, selecting model and effort explicitly
+where exposed. Start with a fresh context (`fork_turns: "none"` in runtimes that
+support it). Do not copy a transcript to compensate for an incomplete packet.
+For Claude native dispatch, use supported model selectors; for Codex, use the
+exposed model/effort fields or verified agent configuration. If a runtime cannot
+override them, disclose inheritance instead of claiming economical routing.
 
-Nothing in `profiles.md`, `roles.md`, or `state-machine.md` should ever need
-to know which runtime implements these. If you find yourself writing "start
-a Herdr pane" inside one of those files, that's a layering violation — move
-it here instead.
+Pass only the assigned role and required instructions to children so they do not
+restart the entire workflow. Keep worker fan-out bounded by available slots and
+the task; children do not automatically become coordinators.
 
-## Herdr (current default when available)
+## Native provider CLIs for cross-provider work
 
-Herdr is a pane/tab/workspace organizer with agent recognition and a CLI.
-Map the six operations onto it:
+Check the actual binary's version and help before constructing a command. Use
+the correct repo directory and an explicit supported model. Read current official
+guidance only when local help leaves an execution question unresolved.
 
-| Operation | Herdr mapping |
-|---|---|
-| `spawnAgent` | Create a sibling pane (default: current tab, current cwd, unless the profile needs a separate worktree — e.g. non-overlapping ownership sets in `full`) and start the role's agent in it. |
-| `sendTask` | Send the task/context into that pane (the packet a role needs — see `roles.md` for what each role receives). |
-| `awaitCompletion` | Poll or wait on the pane/agent's reported status. |
-| `inspectStatus` | Query the pane's/agent's current status without blocking. |
-| `collectResult` | Read the agent's output from the pane, or — preferably — from the task artifact it wrote to (`state-machine.md`), which survives a crashed pane the scrollback doesn't. |
-| `stopAgent` | Close the pane / stop the agent when its role is done. |
+Codex CLI commonly supports `exec`, `--model`, `--sandbox read-only`, `--cd`,
+`--output-last-message`, `--json`, and `-c model_reasoning_effort=...`; verify
+against the installed version. Feed the packet through stdin (`-`). For Claude,
+verify print/headless mode, model and tool restrictions, and supported effort
+options from its installed help. Do not assume flags are identical across CLIs.
 
-Use `--no-focus` (or the equivalent for background work) unless the user
-asked to switch context to it. Default to a sibling pane in the current tab
-and the current working directory — don't create a new workspace, tab,
-worktree, or cwd unless the profile's ownership rules require it (`full`'s
-non-overlapping file sets) or the user explicitly asks.
+Pass arbitrary prompts through stdin or a safely handled file, never interpolate
+them into shell commands. Use a unique temporary directory for stdout, stderr,
+and result artifacts. Apply a bounded timeout, inspect exit status and output,
+and resolve possibly live processes after timeout before retrying or editing
+their files. Empty output, permission denial, or a timeout is not success.
 
-## Native fallback — this CLI's own agent dispatch
+For review/research, enforce read-only project access and restrict external
+write-capable tools as well; a prompt saying "read-only" is not enforcement.
+For edits, use scoped write permissions, preserve existing user changes, and
+isolate conflicting work when the runtime supports it. Do not bypass permission
+controls. If required restrictions cannot be established, use a supported native
+alternative or return the prepared handoff and the limitation.
 
-When Herdr isn't running, or for a runtime that dispatches agents directly
-(a plain Claude CLI or Codex CLI session, an SDK-based orchestrator):
+Host inspection and appropriate checks complete the handoff. Retry/escalation
+follows [routing.md](routing.md), not an automatic provider-failover chain.
 
-| Operation | Native mapping |
-|---|---|
-| `spawnAgent` | Dispatch a fresh subagent for the role (a non-fork dispatch — each role should start with zero shared context except what `sendTask` gives it, per `roles.md`'s "reviewer doesn't see the implementer's reasoning transcript" rule). |
-| `sendTask` | The dispatch prompt itself — self-contained, since a fresh agent has no memory of the coordinating session. |
-| `awaitCompletion` | Wait for the dispatch's completion notification. |
-| `inspectStatus` | Check whether the dispatch is still running. |
-| `collectResult` | Read the dispatch's final report, or the task artifact it wrote. |
-| `stopAgent` | Stop/cancel a dispatch that's no longer needed. |
+## Managed terminals and worktrees
 
-A single session running a `quick` profile solo (implementer only, no
-coordinator) doesn't need any of this — it just does the work and runs
-verification itself.
+Use the relevant available runtime skill when the user/project explicitly chooses
+Orca or Herdr, or work touches their managed state. Respect its environment and
+ownership requirements. Neither wins merely by being installed.
 
-## Resolving which adapter to use
-
-1. Project config (`project-config.md`) may declare a `runtime` preference.
-2. Otherwise, detect what's actually available in the current environment.
-3. If genuinely ambiguous and it matters (`full` profile, real parallelism
-   at stake), ask rather than guess.
-
-## Adding a new runtime later
-
-A new runtime adapter is a new mapping table in this file — nothing in
-`profiles.md`, `roles.md`, `state-machine.md`, or `model-routing.md` should
-need to change. If adding one *does* require touching those files, that's a
-sign something runtime-specific leaked into the portable layer; fix the
-leak, not the new adapter.
+Map spawn/send/wait/status/result/stop to that runtime's documented operations.
+Prefer completion artifacts or structured status to parsing terminal prose.
+Do not close a user-owned pane as worker cleanup. Use an isolated worktree when
+concurrent edits would conflict; independent work in disjoint files may share a
+workspace if integration and evidence freshness remain controlled.
