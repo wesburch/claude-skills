@@ -20,6 +20,13 @@ Read [project-config.md](references/project-config.md) only to interpret an
 override; absent a config, infer checks from the repo and use the defaults here.
 Do not create configuration as a prerequisite.
 
+Before reading broadly, check cheaply for a usable, current local
+code-intelligence index exposed by the project or agent environment. If present,
+use it for initial orientation, symbol discovery, dependency tracing, and
+blast-radius analysis. Treat indexed and inferred relationships as navigation
+evidence, not source truth; inspect consequential source directly. A missing,
+stale, or unsupported index must not block the task: use normal repository search.
+
 Parse an initial `quick`, `standard`, `full`, or `auto` as the profile; the rest
 is the task. Explicit profile wins over configured default; `auto` selects by
 task shape. State the choice and reason in one sentence, then proceed.
