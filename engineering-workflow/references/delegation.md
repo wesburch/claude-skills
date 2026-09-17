@@ -15,6 +15,17 @@ Give a fresh agent only the context needed to execute:
 - Owned files or bounded search area; exclusions and relevant references.
 - Baseline and relevant committed, staged, unstaged, and untracked changes.
 - Permitted actions, tools, chosen model/effort, and task-specific time budget.
+- Applicable project rules, including `.agents/engineering-workflow.md` and
+  any code-index-first requirement. For a tool-enabled child, name the relevant
+  instruction files to read; for a tools-disabled reviewer, supply the relevant
+  rules in the packet. Do not assume the runtime inherits host instructions,
+  hooks or CLAUDE.md context; confirm its behavior and pass missing constraints
+  explicitly. Use the index before code discovery when required, and ordinary
+  text search for prose or literal strings that do not require code discovery.
+- Cost limits: start with summaries, failure excerpts or log tails, expanding
+  only to diagnose missing context. Preserve full logs and actual exit status.
+  Prefer completion notifications; otherwise use bounded waits/status checks
+  with backoff, not a tight polling loop. Return a compact report.
 - Verification commands or behavior to check; prior failures and hypotheses.
 - Expected compact return and stop conditions.
 

@@ -29,5 +29,13 @@ plain language. Avoid introducing a large configuration schema before needed.
 If legacy project instructions explicitly require nine-state tracking or stronger
 role separation, retain those locally instead of rewriting the config silently.
 
+When the user explicitly authorizes workflow simplification, replace conflicting
+local requirements in the same change. Choose process by risk, not whether a
+task has an artifact or identifier. Keep actual test commands, release rules,
+data-protection invariants and product approval boundaries. Mark legacy recorder
+protocols as opt-in where appropriate, leaving historical evidence intact.
+Do not silently weaken recorder scripts or disable required checks to make a
+new policy appear to pass an old protocol.
+
 Cross-repo work reads each affected repo's relevant rules; shared integration
 checks must meet all applicable contracts. Do not load unrelated repo configs.

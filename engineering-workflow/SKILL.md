@@ -33,16 +33,37 @@ task shape. State the choice and reason in one sentence, then proceed.
 
 | Profile | Default process |
 |---|---|
-| Quick | Current agent implements a bounded, low-risk change and runs appropriate checks; no reviewer or coordinator child |
-| Standard | One implementer, appropriate verification, one independent reviewer; main session implements or coordinates |
-| Full | Main session coordinates dependencies and scoped workers, integration checks, independent review; load [advanced.md](references/advanced.md) |
+| Quick | Current agent implements and checks a bounded, low-risk change; no mandatory reviewer, coordinator or task artifact |
+| Standard | One implementer runs the checks; one independent reviewer assesses the final diff and evidence; no separate verifier |
+| Full | Standard assurance plus the coordination, integration checks or specialist review justified by concrete dependencies/risks; load [advanced.md](references/advanced.md) |
 
-Choose quick for obvious, cohesive, low-risk work; standard for meaningful
-feature or bug work; full for consequential architecture, dependent streams,
-or long-running work that needs coordination. Fit the process to the task.
+Choose by consequences of error, not task name, tracking directory, line count
+or duration. Documentation, copy and small visual adjustments are usually quick;
+behavioral features and meaningful fixes are usually standard. Authentication,
+authorization, data migrations, irreversible ledger changes and model promotion
+need independent review and evidence for their specific failure modes; full is
+appropriate when those risks require additional coordination or specialist work.
+High risk alone does not require three agents or a separate test-running agent.
 If quick reveals consequential or hard-to-detect risk, explain and add independent
 review using standard's gates. Never downgrade merely to bypass a finding.
 Full may simplify to standard as dependencies disappear, without restarting.
+
+## Keep execution economical
+
+- Work locally by default. Delegate only a bounded independent assignment or
+  required review; the main session should not become a coordinator for a single
+  implementer merely because the task has an ID.
+- Read the assigned packet and relevant source once; use narrow searches and
+  changed regions on follow-up. Load reference files only when their decision
+  point is reached. Keep tool output to findings, failures and useful summaries.
+- Run focused checks while iterating, then required integration/release checks
+  once on the final applicable changeset. A later edit refreshes affected evidence;
+  it does not automatically restart every check or every review from scratch.
+- Keep long commands in the background when supported. Use completion notices or
+  bounded waits; do not repeatedly poll unchanged state or ingest full logs.
+- Preserve a compact handoff only when it prevents rediscovery. Use existing task
+  records; no mandatory state machine, frozen ownership declaration or repeated
+  evidence copying merely because a work package is tracked.
 
 ## Completion contract
 
@@ -50,12 +71,15 @@ Full may simplify to standard as dependencies disappear, without restarting.
 - Run appropriate checks on the final change. Record commands, results, and
   the artifact/revision checked; include relevant working-tree changes.
   Scripts supply deterministic evidence directly: no verifier agent is needed
-  to read exit codes. Use visual judgment when behavior requires it.
+  to read exit codes. The implementer may run and inspect both automated and
+  visual checks; the independent reviewer spot-checks consequential evidence.
+  Preserve real exit codes when filtering logs. Use visual judgment when needed.
 - Standard/full review uses an instance that did not author the change. Supply
   requirements, final diff, and current verification evidence; see
   [delegation.md](references/delegation.md). If independent review is unavailable,
   finish useful implementation/checks and report review as outstanding; do not
-  silently claim self-review satisfies the gate.
+  silently claim self-review satisfies the gate or mark review-gated work ready
+  to merge. Add another reviewer only for a distinct unresolved risk.
 - Resolve verification failures before final review. An investigative review
   may help diagnose a failure, but does not count as completion approval.
 - Repair defects and rerun checks affected by the change, including required
@@ -67,6 +91,9 @@ Full may simplify to standard as dependencies disappear, without restarting.
 No mandatory state log, task artifact, knowledge handoff, or human approval
 ceremony. Project gates and authorization still govern merge/deploy/external
 actions; a review verdict is not permission for them.
+Existing explicit project overrides remain binding unless the user authorizes
+changing them. When simplifying a workflow, update its conflicting local rules
+as well; changing the shared skill alone cannot remove a stronger repo override.
 
 ## Load only what changes the next decision
 

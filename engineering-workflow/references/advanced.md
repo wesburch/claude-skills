@@ -21,9 +21,11 @@ session should not duplicate its bookkeeping. Respect runtime concurrency limits
 
 ## Planning and specialist review
 
-For consequential architecture or uncertain decomposition, use one independent
-planning reviewer to assess both failure modes and implementation readiness.
-Resolve material findings before dependent work starts. Planning/review does not
+For consequential architecture or uncertain decomposition, add a planning review
+only when it answers a specific risk before implementation that final review
+would catch too late. A design phase does not automatically add another reviewer
+or repeat an already answered question. Resolve material findings before
+dependent work starts. Planning/review does not
 introduce a human approval gate beyond existing user authorization and project
 rules. Ask for missing product decisions when they materially change the result.
 
@@ -41,10 +43,13 @@ Prefer the project's existing tracker. Otherwise a task artifact under configure
 dependencies, latest revision, checks, findings, and next action.
 
 A compact status such as ready / working / checking / reviewing / done / blocked
-is sufficient unless the project already requires a richer state machine.
+is sufficient unless an explicitly applicable project contract requires more.
 Record the blocker and resumption action. If an existing project uses the legacy
-nine-state workflow, preserve its semantics and log requirements; these are no
-longer universal defaults. No append-only transition ceremony for ordinary tasks.
+nine-state workflow, check its current applicability before loading its full
+protocol. Preserve it for tasks that still opt into or explicitly require it;
+tracking a task in the same directory is not itself an escalation under the
+skill's defaults. User-authorized simplification may retire a local requirement,
+but must not rewrite historical approvals or bypass an active release gate.
 
 Review approval refers to a specific artifact. New edits require refreshed
 affected checks and review; no status label overrides that requirement.
