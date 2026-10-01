@@ -1,0 +1,21 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# evals/bin/verify: prove the harness works without calling a model. Runs on
+# the built-in example task alone, or also on every task of an attached
+# evidence store; whatever it cannot check it lists as SKIP.
+#
+# evals/bin/verify: prove the harness works without calling a model
+# (workspace reset, hidden-data isolation, grader sensitivity, evidence
+# accounting, eval tool profile). Exit 0 only when every check passes.
+
+require_relative "../lib/verify"
+
+checks = Evals::Verify.checks
+checks.each { |c| puts format("%-4s %-10s %s%s", c.pass ? "PASS" : "FAIL", c.area, c.name, c.detail.to_s.empty? ? "" : "  [#{c.detail.to_s[0, 90]}]") }
+failed = checks.count { |c| !c.pass }
+skips = Evals::Verify.skips
+puts "\n#{checks.size - failed}/#{checks.size} harness checks passed."
+puts "Evidence store: #{Evals.store ? 'attached' : 'not attached (public-only mode)'}."
+skips.each { |s| puts "SKIP #{s}" }
+exit(failed.zero? ? 0 : 1)

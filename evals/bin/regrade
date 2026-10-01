@@ -1,0 +1,88 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# evals/bin/regrade [RUN_DIR ...]: re-judge stored runs with the current
+# graders, hidden data and isolation audit, without calling a model.
+#
+# Grading rebuilds a fresh workspace, re-applies the run's saved
+# workspace.diff for write tasks (read-only tasks made no changes) and grades
+# the saved final reply; runs whose diff predates new-file capture keep their
+# grade. The isolation audit re-reads the preserved tool-call trace. Validity
+# is then recomputed. The previous judgement (grade, audit, invalid reasons,
+# validity, grading version) is appended to "grade_history"; nothing earlier
+# is discarded. Raw traces are only read. The cost breakdown is rebuilt from
+# the record, the saved packet and the saved reply.
+
+require_relative "../lib/eval_support"
+require_relative "../lib/graders"
+
+dirs = ARGV.empty? ? Dir.glob(File.join(Evals.results_dir, "*", "*")).select { |d| File.exist?(File.join(d, "record.json")) } : ARGV
+dirs.sort.each do |dir|
+  rec = JSON.parse(File.read(File.join(dir, "record.json")))
+  task = Evals.load_task(rec["task_id"])
+  changed = Evals.frozen_mismatches(task)
+  abort "evals/bin/regrade: #{task.id} is frozen and these inputs no longer match its freeze file: #{changed.join(', ')}" unless changed.empty?
+  history = { "regraded_at" => Time.now.utc.iso8601, "previous_grading_version" => rec["grading_version"] || "grade-v1",
+              "previous_pass" => rec["deterministic_pass"], "previous" => rec["grader"],
+              "previous_grader_fingerprint" => rec["grader_fingerprint"], "previous_contamination" => rec["contamination"],
+              "previous_isolation_audit" => rec["isolation_audit"], "previous_invalid_reasons" => rec["invalid_reasons"] || Evals.invalid_reasons(rec),
+              "previous_valid" => rec["valid_for_model_evidence"] }.compact
+
+  final = File.read(File.join(dir, "artifacts", "final.md")) rescue nil
+  diff = File.join(dir, "artifacts", "workspace.diff")
+  grade = nil
+  grade_note = nil
+  if !(final && File.exist?(diff))
+    grade_note = "grade kept: artifacts missing"
+  else
+    Dir.mktmpdir("eval-regrade-") do |tmp|
+      ws, = Evals.prepare_workspace(task, tmp)
+      if task.read_only?
+        grade_note = "grade kept: read-only run changed files" unless Array(rec.dig("changes", "changed_paths")).empty?
+      elsif !rec["diff_includes_new_files"]
+        grade_note = "grade kept: write-task diff predates new-file capture"
+      elsif !File.zero?(diff)
+        _, err, st = Open3.capture3("git", "-C", ws, "apply", "--whitespace=nowarn", File.realpath(diff))
+        grade_note = "grade kept: diff does not apply (#{err.strip[0, 80]})" unless st.success?
+      end
+      grade = Evals::Graders.grade(task, final, File.realpath(ws)) unless grade_note
+    end
+  end
+
+  audit = Evals::IsolationAudit.for_run(dir, rec, task)
+  (rec["grade_history"] ||= []) << history
+  if grade
+    rec["grader"] = grade
+    rec["deterministic_pass"] = grade["pass"]
+  end
+  # A kept grade keeps its own fingerprint and says which grading produced it.
+  if grade_note
+    rec["grade_note"] = grade_note
+    rec["grade_kept_from"] ||= history["previous_grading_version"]
+  else
+    rec.delete("grade_note")
+    rec.delete("grade_kept_from")
+  end
+  rec["grader_fingerprint"] = Evals.grader_fingerprint(task) if grade
+  if audit
+    rec["isolation_audit"] = audit
+  else
+    rec.delete("isolation_audit")
+  end
+  rec["contamination"] = Evals::IsolationAudit.contamination_summary(audit)
+  rec["grading_version"] = Evals.config["grading_version"]
+  rec["task_family"] = task["task_family"] || task.id
+  saved_packet = File.read(File.join(dir, "packet.md")) rescue task.packet_text
+  rec["cost_breakdown"] = Evals.cost_breakdown(rec, task, packet: saved_packet, final: final)
+  rec["invalid_reasons"] = Evals.invalid_reasons(rec)
+  rec["valid_for_model_evidence"] = rec["invalid_reasons"].empty?
+  File.write(File.join(dir, "record.json"), JSON.pretty_generate(rec))
+
+  g = rec["grader"]
+  metric = g.slice("recall", "precision", "tests_passed", "critical_recall", "incorrect_findings", "unclassified_findings").map { |k, v| "#{k}=#{v}" }.join(" ")
+  before = history["previous_valid"] ? "valid" : "invalid(#{Array(history['previous_invalid_reasons']).join('; ')})"
+  after = rec["valid_for_model_evidence"] ? "valid" : "invalid(#{rec['invalid_reasons'].join('; ')})"
+  audit_s = audit ? %w[external_read external_write reference_exposure].map { |k| "#{k.sub('external_', '').sub('reference_', 'ref_')}=#{audit.dig(k, 'status')}" }.join(" ") +
+                    " cwd_escape=#{audit.dig('cwd_escape', 'occurred')}" : "audit=unavailable"
+  puts "#{File.basename(dir)} pass=#{rec['deterministic_pass']} #{metric} | #{before} -> #{after} | #{audit_s}#{grade_note ? " | #{grade_note}" : ''}"
+end

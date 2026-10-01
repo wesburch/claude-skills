@@ -1,0 +1,19 @@
+id: example-review
+category: seeded-defect-review
+title: Review a small script change with two planted defects (built-in example)
+# A self-contained task: the base tree is the `fixture` directory, so no
+# source repository is needed. Real tasks name a `repo` and a `sha` instead
+# and live in a private evidence store (see evals/README.md).
+fixture: fixture
+scope: [.]
+overlay: overlay            # the change under review, applied after the base commit
+workspace_tree: 72e45228ec90303fadd060f170b855edeff0a82b  # tree of the base commit built from fixture/; checked every trial
+role: wf-reviewer
+access: read-only
+owned_files: []
+packet: packet.md
+grader: review
+# Isolation policy (read by lib/isolation_audit.rb, never shown to the model).
+eval_policy:
+  scratch_writes: false
+  cwd_independence: false

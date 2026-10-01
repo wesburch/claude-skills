@@ -1,0 +1,212 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# evals/bin/run: one or more trials of an eval task for one model + effort.
+#
+#   evals/bin/run --task ID --host claude-code|codex --model ID --effort LEVEL
+#                 [--trials N] [--dry-run] [--timeout SECONDS]
+#
+# Each trial exports a fresh history-free workspace at the task SHA, gives the
+# model only the task packet, runs it in the eval tool profile (local tools, no
+# MCP, isolated from user config), grades deterministically with hidden data,
+# audits isolation (lib/isolation_audit.rb), and writes results/<date>/<run>/record.json.
+# A trial counts as model evidence only when the observed model and effort
+# match the request; otherwise it is kept and attributed to what actually ran.
+
+require_relative "../lib/eval_support"
+require_relative "../lib/graders"
+require "optparse"
+
+opts = { trials: 1, timeout: 1800 }
+OptionParser.new do |o|
+  o.banner = "usage: evals/bin/run --task ID --host HOST --model ID --effort LEVEL [--trials N] [--dry-run]"
+  o.on("--task ID") { |v| opts[:task] = v }
+  o.on("--host HOST", %w[claude-code codex]) { |v| opts[:host] = v }
+  o.on("--model ID") { |v| opts[:model] = v }
+  o.on("--effort LEVEL") { |v| opts[:effort] = v }
+  o.on("--trials N", Integer) { |v| opts[:trials] = v }
+  o.on("--timeout SECONDS", Integer) { |v| opts[:timeout] = v }
+  o.on("--dry-run", "prepare and verify the workspace, print the command; no model call") { opts[:dry_run] = true }
+  o.on("--confirm", "required for more than max_trials_without_confirm trials") { opts[:confirm] = true }
+end.parse!
+
+def fail!(msg)
+  warn "evals/bin/run: #{msg}"
+  exit 2
+end
+
+fail!("--task, --host, --model and --effort are required") unless opts.values_at(:task, :host, :model, :effort).all?
+fail!("effort #{opts[:effort]} is outside v0 (#{Evals.config['allowed_efforts'].join(', ')})") unless Evals.config["allowed_efforts"].include?(opts[:effort])
+task = Evals.load_task(opts[:task]) rescue fail!($!.message)
+begin
+  Evals.model_available!(opts[:host], opts[:model])
+rescue Evals::Error => e
+  fail!(e.message)
+end
+fail!("task #{task.id} has no pinned workspace_tree; run with --dry-run and record it") unless task["workspace_tree"] || opts[:dry_run]
+changed = Evals.frozen_mismatches(task)
+fail!("task #{task.id} is frozen and these inputs no longer match its freeze file: #{changed.join(', ')}") unless changed.empty?
+
+# Repeated trials cost money: above the configured count, print the projection
+# from prior valid runs of this task/host/model/effort and require --confirm.
+limit = Evals.config["max_trials_without_confirm"].to_i
+if opts[:trials] > limit && !opts[:confirm] && !opts[:dry_run]
+  require_relative "../lib/summary"
+  groups, = Evals::Summary.group(Evals::Summary.load_records)
+  g = groups.find { |x| x.values_at("task_id", "host", "model", "effort") == [task.id, opts[:host], opts[:model], opts[:effort]] }
+  per = g && g["median_cost_usd"]
+  warn "Projected: #{opts[:trials]} trials x #{per ? format('$%.4f', per) : 'unknown (no prior valid run)'} " \
+       "median API-equivalent cost = #{per ? format('$%.2f', per * opts[:trials]) : 'unknown'}; " \
+       "median wall #{g ? g['median_wall_seconds'] : '?'}s each. Re-run with --confirm to proceed."
+  exit 2
+end
+
+def run_trial(task, opts, trial)
+  started = Time.now.utc
+  run_id = "#{started.strftime('%Y%m%dT%H%M%SZ')}-#{task.id}-#{opts[:host]}-#{opts[:model]}-#{opts[:effort]}-#{SecureRandom.hex(3)}"
+  run_dir = opts[:dry_run] ? Dir.mktmpdir("eval-dry-run-") : File.join(Evals.results_dir, started.strftime("%Y-%m-%d"), run_id)
+  artifacts = File.join(run_dir, "artifacts")
+  FileUtils.mkdir_p(artifacts)
+  source_before = Evals.source_state(task)
+  tmp = Dir.mktmpdir("eval-ws-")
+  record = nil
+  begin
+    ws, tree = Evals.prepare_workspace(task, tmp)
+    ws = File.realpath(ws)
+    workspace_ready = Time.now.utc
+    delegate_seconds = nil
+    tree_ok = tree == task["workspace_tree"]
+    packet = task.packet_text
+    File.write(File.join(run_dir, "packet.md"), packet)
+    before = Evals.file_digests(ws)
+    role = task["role"]
+    requested = { "model" => opts[:model], "effort" => opts[:effort] }
+    resolved = requested.dup
+    exit_status = nil
+    failed_results = 0
+    if opts[:host] == "claude-code"
+      _fm, body = Evals.claude_role(role)
+      role_instructions = body
+      cmd = Evals.claude_command(task, model: opts[:model], effort: opts[:effort], artifacts: artifacts, role_body: body, workspace: ws)
+      if opts[:dry_run]
+        puts "workspace tree #{tree} (task #{task['workspace_tree'] || 'unpinned'})", Shellwords.join(cmd["argv"])
+        return nil
+      end
+      t0 = Time.now
+      out, err, st = Evals.run_timed(cmd["env"], cmd["argv"], stdin_data: packet, chdir: ws, timeout: opts[:timeout])
+      delegate_seconds = Time.now - t0
+      File.write(File.join(artifacts, "claude-stream.jsonl"), out)
+      File.write(File.join(artifacts, "claude.err"), err)
+      exit_status = st.exitstatus
+      events = out.lines.filter_map { |l| JSON.parse(l) rescue nil }
+      obs = Evals.claude_observation(events)
+      observed = { "model" => obs["model"], "effort" => obs["effort"] }
+      failed_results = Evals.failed_tool_results_claude(events)
+      tokens = obs["tokens"]
+      cost = { "usd" => obs["cost_usd"], "status" => obs["cost_usd"] ? "api_equivalent_estimate" : "unavailable",
+               "basis" => "Claude Code CLI costUSD at list price; subscription usage is billed differently" }
+      tier = { "requested" => nil, "request_telemetry" => obs["tier_telemetry"],
+               "served" => "unverified (usage.service_tier is Claude's own report; no tier was selected)" }
+      profile = cmd.reject { |k, _| %w[argv settings].include?(k) }.merge("observed_tools" => obs["tools"], "observed_mcp_servers" => obs["mcp_servers"],
+                                                        "permission_mode" => obs["permission_mode"])
+      final_text = obs["final_text"]
+      trace = { "stream" => "artifacts/claude-stream.jsonl", "transcript" => obs["transcript"] }
+    else
+      packet_file = File.join(artifacts, "packet.md")
+      File.write(packet_file, packet)
+      out_dir = File.join(artifacts, "codex")
+      cmd = Evals.codex_command(task, model: opts[:model], effort: opts[:effort], ws: ws, packet_file: packet_file, out: out_dir,
+                                timeout: opts[:timeout])
+      role_instructions = RoutingSupport.read_toml(File.join(Evals::REPO, "agents", "codex", "#{role}.toml"))["developer_instructions"].to_s
+      if opts[:dry_run]
+        puts "workspace tree #{tree} (task #{task['workspace_tree'] || 'unpinned'})", Shellwords.join(cmd["argv"])
+        return nil
+      end
+      t0 = Time.now
+      _o, err, st = Evals.run_timed({}, cmd["argv"], stdin_data: "", timeout: opts[:timeout])
+      delegate_seconds = Time.now - t0
+      File.write(File.join(artifacts, "codex-delegate.err"), err)
+      exit_status = st.exitstatus == 4 ? 0 : st.exitstatus # 4 = isolation not verified; judged below from the record
+      drec = JSON.parse(File.read(File.join(out_dir, "record.json"))) rescue {}
+      o = drec["observed"] || {}
+      observed = { "model" => o["model"], "effort" => o["effort"] }
+      failed_results = Evals.failed_tool_results_codex(drec["rollout"])
+      u = drec["usage"] || {}
+      tokens = { "input" => u["input_tokens"].to_i, "cached_input" => u["cached_input_tokens"].to_i,
+                 "output" => u["output_tokens"].to_i, "reasoning_output" => u["reasoning_output_tokens"].to_i }
+      cost = Evals.codex_cost(o["model"] || opts[:model], tokens)
+      tier = { "requested" => "default", "request_telemetry" => o["service_tier"],
+               "served" => "unverified (no authoritative server-side tier)" }
+      profile = { "profile" => cmd["profile"], "sandbox" => o["sandbox"], "isolation_verified" => drec["isolation_verified"],
+                  "isolation_failures" => drec["isolation_failures"], "approved_command_prefixes" => drec["approved_command_prefixes"] }
+      exit_status = 1 if drec.empty? || drec["exit_status"] != 0 # no record (killed/crashed) or a failed codex run
+      final_text = File.read(File.join(out_dir, "last-message.md")) rescue ""
+      trace = { "delegate_record" => "artifacts/codex/record.json", "rollout" => drec["rollout"] }
+    end
+    File.write(File.join(artifacts, "final.md"), final_text.to_s)
+    # The complete model-visible input: packet (user turn), role instructions
+    # (system/developer), and the exact command and settings.
+    File.write(File.join(run_dir, "role-instructions.md"), role_instructions.to_s)
+    File.write(File.join(run_dir, "command.json"), JSON.pretty_generate({ "argv" => cmd["argv"], "env" => cmd["env"],
+                                                                          "settings" => cmd["settings"] }.compact))
+    after = Evals.file_digests(ws)
+    changed = Evals.changed_paths(before, after)
+    unrelated = task.read_only? ? changed : changed.reject { |p| task.owned.include?(p) }
+    # Include new files: mark everything intent-to-add, then diff against the base.
+    Open3.capture2("git", "-C", ws, "add", "-A", "-N")
+    File.write(File.join(artifacts, "workspace.diff"), Open3.capture2("git", "-C", ws, "diff", "--binary", "HEAD").first)
+    t0 = Time.now
+    grade = Evals::Graders.grade(task, final_text, ws)
+    grading_seconds = Time.now - t0
+    source_after = Evals.source_state(task)
+    accounting = RoutingSupport.account(requested: requested, resolved: resolved, observed: observed)
+    ended = Time.now.utc
+    record = {
+      "suite_version" => Evals.config["suite_version"], "grading_version" => Evals.config["grading_version"],
+      "run_id" => run_id, "trial" => trial, "workspace" => ws,
+      "task_id" => task.id, "task_family" => task["task_family"] || task.id, "category" => task["category"], "repository" => task["repo"], "starting_sha" => task["sha"],
+      "workspace_tree" => tree, "workspace_tree_ok" => tree_ok,
+      "provider" => opts[:host] == "codex" ? "openai" : "anthropic", "host" => opts[:host], "role" => role,
+      "requested" => requested, "resolved" => resolved, "observed" => observed, "service_tier" => tier,
+      "accounting" => accounting.slice("mismatches", "warnings", "evidence_model"),
+      "tool_profile" => profile,
+      "start" => started.iso8601, "end" => ended.iso8601, "wall_seconds" => (ended - started).round(1),
+      "timing" => { "workspace_seconds" => (workspace_ready - started).round(1), "delegate_seconds" => delegate_seconds&.round(1),
+                    "grading_seconds" => grading_seconds.round(2) },
+      "tokens" => tokens, "cost" => cost,
+      "deterministic_pass" => grade["pass"], "grader" => grade,
+      "repair_loops" => { "harness" => 0, "agent_failed_tool_results" => failed_results,
+                          "method" => "single headless attempt; failed tool results counted from the transcript as an agent-internal proxy" },
+      "human_interventions" => 0,
+      "changes" => { "changed_paths" => changed, "unrelated_paths" => unrelated },
+      "source_repo_unchanged" => source_before == source_after,
+      "exit_status" => exit_status, "trace" => trace, "environment" => Evals.environment_fingerprint,
+      "prompt" => { "packet_sha256" => Digest::SHA256.hexdigest(packet), "role_instructions_sha256" => Digest::SHA256.hexdigest(role_instructions.to_s),
+                    "files" => %w[packet.md role-instructions.md command.json] },
+      "harness" => Evals.harness_fingerprint(task, opts[:host]),
+      "grader_fingerprint" => Evals.grader_fingerprint(task),
+      "diff_includes_new_files" => true
+    }
+    audit = Evals::IsolationAudit.for_run(run_dir, record, task)
+    record["isolation_audit"] = audit if audit
+    record["contamination"] = Evals::IsolationAudit.contamination_summary(audit)
+    record["cost_breakdown"] = Evals.cost_breakdown(record, task, packet: packet, final: final_text)
+    record["invalid_reasons"] = Evals.invalid_reasons(record)
+    record["valid_for_model_evidence"] = record["invalid_reasons"].empty?
+    File.write(File.join(run_dir, "record.json"), JSON.pretty_generate(record))
+    record
+  ensure
+    FileUtils.remove_entry(tmp) if tmp && File.exist?(tmp)
+  end
+end
+
+opts[:trials].times do |i|
+  rec = run_trial(task, opts, i + 1)
+  next unless rec
+  g = rec["grader"]
+  metric = g.slice("recall", "precision", "tests_passed", "critical_recall", "total_recall", "verdict", "verdict_correct", "incorrect_findings", "unclassified_findings").map { |k, v| "#{k}=#{v}" }.join(" ")
+  puts format("%s pass=%s valid=%s observed=%s@%s tokens=%s cost=%s(%s) %s",
+              rec["run_id"], rec["deterministic_pass"], rec["valid_for_model_evidence"],
+              rec.dig("observed", "model"), rec.dig("observed", "effort"), rec["tokens"].values_at("input", "output").join("/"),
+              rec.dig("cost", "usd")&.round(4), rec.dig("cost", "status"), metric)
+end

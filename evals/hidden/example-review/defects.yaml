@@ -1,0 +1,38 @@
+# Reference for the built-in example task. In a real task this file is
+# private: it is read only by the grader, after a run, and never shown to a
+# model. This one is public because the task exists to exercise the harness
+# and to show the format; it measures nothing.
+#
+# Finding classes, tried in this order: defect, mechanical duplicate,
+# restatement, valid_blocking (`other_blocking`), incorrect, process note,
+# valid but out of scope (`acceptable`), else unclassified.
+line_tolerance: 3
+expected_verdict: CHANGES_REQUESTED
+defects:
+  # The script creates FILE with `touch` when it is missing, then rotates it
+  # and exits 0, where X3 requires a refusal.
+  - id: E1-missing-file-not-refused
+    axis: SPEC
+    requirement: X3
+    critical: true
+    lines: [27, 28]
+    keywords: 'touch|does not exist|missing file|non-?existent|creates? (the|an?) (empty )?file|never refuses|exits? (0|zero)'
+  # `touch $file` is unquoted, so a path with a space is split.
+  - id: E2-unquoted-path
+    axis: STANDARDS
+    requirement: null
+    critical: false
+    lines: [28, 28]
+    keywords: 'unquoted|quot|word.?split|space'
+mechanical: []
+restatements: []
+other_blocking: []
+incorrect: []
+process_notes:
+  - id: P1-could-not-execute
+    keywords: 'could not be (executed|run)|unable to (run|execute)'
+acceptable:
+  - id: A1-no-tests
+    keywords: 'no tests?|untested|test coverage'
+  - id: A2-usage-on-stdout
+    keywords: 'stdout|usage'

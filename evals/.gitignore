@@ -1,0 +1,13 @@
+# Evidence is not kept in this repository. Runs made here without an
+# evidence store land in results/, which stays local; with a store attached
+# they are written to the store instead (see README.md).
+/results/
+# Local, machine-specific configuration (for example `store: <path>`).
+/config.local.yaml
+# Only the built-in example task and the generic comparison tool are public.
+/tasks/*
+!/tasks/example-review/
+/hidden/*
+!/hidden/example-review/
+/analysis/*
+!/analysis/compare.rb

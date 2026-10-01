@@ -1,0 +1,198 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Deterministic tests for the eval harness. No model calls. They run on the
+# built-in example task and need no evidence store.
+
+require "minitest/autorun"
+require "open3"
+require_relative "../lib/verify"
+
+class EvalHarnessTest < Minitest::Test
+  RUN = File.expand_path("../bin/run", __dir__)
+
+  def test_every_harness_verification_check_passes
+    failed = Evals::Verify.checks.reject(&:pass)
+    assert_empty failed.map { |c| "#{c.area}: #{c.name} [#{c.detail}]" }
+  end
+
+  def run_cli(*args) = Open3.capture3(RbConfig.ruby, RUN, *args)
+
+  def test_refuses_efforts_outside_v0
+    %w[xhigh max ultra].each do |e|
+      _, err, st = run_cli("--task", "example-review", "--host", "codex", "--model", "gpt-5.6-terra", "--effort", e)
+      assert_equal 2, st.exitstatus, e
+      assert_match(/outside v0/, err)
+    end
+  end
+
+  def test_refuses_listed_but_inaccessible_codex_model
+    skip "no Codex account catalog" unless File.exist?(File.join(Dir.home, ".codex", "models_cache.json"))
+    cache = JSON.parse(File.read(File.join(Dir.home, ".codex", "models_cache.json")))
+    skip "gpt-6.1-sol is accessible now" if cache["models"].any? { |m| m["slug"] == "gpt-6.1-sol" && m["visibility"] == "list" }
+    _, err, st = run_cli("--task", "example-review", "--host", "codex", "--model", "gpt-6.1-sol", "--effort", "medium", "--dry-run")
+    assert_equal 2, st.exitstatus
+    assert_match(/Listed but not Accessible/, err)
+  end
+
+  def test_refuses_unknown_model
+    _, err, st = run_cli("--task", "example-review", "--host", "claude-code", "--model", "claude-imaginary-9", "--effort", "low")
+    assert_equal 2, st.exitstatus
+    assert_match(/not in the registry/, err)
+  end
+
+  def test_codex_cost_is_labelled_estimate_not_charge
+    c = Evals.codex_cost("gpt-5.6-luna", { "input" => 1_000_000, "cached_input" => 500_000, "output" => 100_000 })
+    assert_equal "api_equivalent_estimate", c["status"]
+    assert_in_delta 0.5 * 0.20 + 0.5 * 0.02 + 0.1 * 1.20, c["usd"], 1e-9
+    assert_match(/unverified/, c["basis"])
+    assert_equal "unavailable", Evals.codex_cost("no-such-model", {})["status"]
+  end
+
+  def test_recommendation_needs_enough_valid_trials
+    g = [{ "task_id" => "t", "model" => "a", "effort" => "low", "valid_trials" => 1, "pass_rate" => 1.0, "critical_misses" => 0,
+           "median_repair_loops" => 0, "cost_per_success_usd" => 0.01 },
+         { "task_id" => "t", "model" => "b", "effort" => "low", "valid_trials" => 1, "pass_rate" => 1.0, "critical_misses" => 0,
+           "median_repair_loops" => 0, "cost_per_success_usd" => 0.02 }]
+    assert_match(/insufficient evidence/, Evals::Summary.recommend(g, candidate: "a@low", reference: "b@low", task_id: "t"))
+    g.each { |x| x["valid_trials"] = 3 }
+    # Three trials on one task clear the per-task bar but stay preliminary.
+    rec = Evals::Summary.recommend(g, candidate: "a@low", reference: "b@low", task_id: "t")
+    assert_match(/\Apreliminary: .*3 valid samples over 1 distinct task/, rec)
+    refute_match(/consider promotion/, rec)
+  end
+
+  def test_promotion_needs_nine_samples_over_three_tasks_per_model_effort_and_role
+    row = lambda do |task, model, effort, family: task, n: 3|
+      { "task_id" => task, "task_family" => family, "role" => "wf-reviewer", "host" => "h", "model" => model, "effort" => effort,
+        "valid_trials" => n, "pass_rate" => 1.0, "critical_misses" => 0, "median_repair_loops" => 0,
+        "cost_per_success_usd" => model == "a" ? 0.01 : 0.02 }
+    end
+    rec = ->(g) { Evals::Summary.recommend(g, candidate: "a@medium", reference: "b@medium", task_id: "t1") }
+    three = %w[t1 t2 t3].flat_map { |t| [row.call(t, "a", "medium"), row.call(t, "b", "medium")] }
+    assert_match(/consider promotion \(recommendation only\)/, rec.call(three))
+    # Nine samples on one task are not three tasks.
+    assert_match(/\Apreliminary/, rec.call([row.call("t1", "a", "medium", n: 9), row.call("t1", "b", "medium", n: 9)]))
+    # A defect task and its control share a family and count once.
+    paired = [row.call("t1", "a", "medium"), row.call("t2", "a", "medium", family: "pair"), row.call("t3", "a", "medium", family: "pair"),
+              row.call("t1", "b", "medium")]
+    assert_match(/\Apreliminary: .*9 valid samples over 2 distinct task/, rec.call(paired))
+    # High-effort runs never count toward medium.
+    mixed = [row.call("t1", "a", "medium"), row.call("t2", "a", "medium"), row.call("t3", "a", "high"), row.call("t1", "b", "medium")]
+    assert_match(/\Apreliminary: .*6 valid samples over 2 distinct task/, rec.call(mixed))
+    ready = Evals::Summary.promotion_readiness(three).find { |x| x["model"] == "a" }
+    assert_equal ["meets the sample minimum", 9, 3], ready.values_at("status", "valid_samples", "distinct_tasks")
+  end
+
+  def test_source_state_ignores_the_harness_results_tree_and_nothing_else
+    Dir.mktmpdir do |repo|
+      system("git", "-C", repo, "init", "-q")
+      FileUtils.mkdir_p(File.join(repo, "evals", "results", "2026-01-01"))
+      File.write(File.join(repo, "tracked.txt"), "a")
+      system({ "GIT_AUTHOR_NAME" => "t", "GIT_AUTHOR_EMAIL" => "t@example.invalid", "GIT_COMMITTER_NAME" => "t", "GIT_COMMITTER_EMAIL" => "t@example.invalid" },
+             "git", "-C", repo, "-c", "commit.gpgsign=false", "add", "-A")
+      system({ "GIT_AUTHOR_NAME" => "t", "GIT_AUTHOR_EMAIL" => "t@example.invalid", "GIT_COMMITTER_NAME" => "t", "GIT_COMMITTER_EMAIL" => "t@example.invalid" },
+             "git", "-C", repo, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base")
+      ENV["EVAL_REPO_SCRATCH"] = repo
+      task = Evals::Task.new("scratch", repo, { "repo" => "scratch" })
+      before = Evals.source_state(task)
+      File.write(File.join(repo, "evals", "results", "2026-01-01", "record.json"), "{}")
+      assert_equal before, Evals.source_state(task), "a new run record must not read as a source change"
+      File.write(File.join(repo, "tracked.txt"), "b")
+      refute_equal before, Evals.source_state(task), "a real source change must still be seen"
+    end
+  ensure
+    ENV.delete("EVAL_REPO_SCRATCH")
+  end
+
+  def test_cost_breakdown_keeps_preparation_execution_verification_and_repair_apart
+    task = Evals.load_task("example-review")
+    rec = { "cost" => { "usd" => 0.07, "status" => "api_equivalent_estimate" }, "tokens" => { "input" => 10 }, "wall_seconds" => 40.0,
+            "timing" => { "delegate_seconds" => 31.5, "grading_seconds" => 0.2 }, "grader" => { "findings" => 4, "unclassified_findings" => 1 },
+            "repair_loops" => { "harness" => 0, "agent_failed_tool_results" => 2 } }
+    b = Evals.cost_breakdown(rec, task, packet: task.packet_text, final: "x" * 400)
+    assert_equal %w[preparation delegate_execution host_verification repair], b.keys
+    assert_equal %w[reusable_eval_setup per_task_delegation], b["preparation"].keys
+    assert_equal 4, b.dig("preparation", "per_task_delegation", "packet", "requirement_items")
+    assert_equal "not_recorded", b.dig("preparation", "reusable_eval_setup", "status")
+    assert_equal [0.07, 31.5, "delegate process only"], b["delegate_execution"].values_at("usd", "wall_seconds", "wall_basis")
+    assert_equal [0.0, 100, 4, 1], [b.dig("host_verification", "usd"), b.dig("host_verification", "reply", "est_tokens"),
+                                   b.dig("host_verification", "findings_to_read"), b.dig("host_verification", "findings_needing_adjudication")]
+    assert_equal [0, 2], b["repair"].values_at("harness_loops", "delegate_internal_failed_tool_results")
+    old = Evals.cost_breakdown(rec.reject { |k, _| k == "timing" }, task, packet: "p", final: "")
+    assert_match(/whole trial/, old.dig("delegate_execution", "wall_basis"))
+    assert_equal "not_recorded", old.dig("preparation", "reusable_eval_setup", "status")
+  end
+
+  def test_summary_reads_only_top_level_run_records
+    Dir.mktmpdir do |d|
+      run = File.join(d, "2026-01-01", "run-a")
+      FileUtils.mkdir_p(File.join(run, "artifacts", "codex"))
+      File.write(File.join(run, "record.json"), JSON.generate({ "suite_version" => Evals.config["suite_version"], "run_id" => "run-a" }))
+      File.write(File.join(run, "artifacts", "codex", "record.json"), JSON.generate({ "role" => "wf-explorer" }))
+      assert_equal ["run-a"], Evals::Summary.load_records(d).map { |r| r["run_id"] }
+    end
+  end
+
+  def test_summary_counts_the_current_suite_and_declared_comparable_versions_only
+    Dir.mktmpdir do |d|
+      { "now" => Evals.config["suite_version"], "prior" => "eval-v0.2", "old" => "eval-v0.1" }.each do |id, version|
+        run = File.join(d, "2026-01-01", "run-#{id}")
+        FileUtils.mkdir_p(run)
+        File.write(File.join(run, "record.json"), JSON.generate({ "suite_version" => version, "run_id" => "run-#{id}" }))
+      end
+      assert_equal %w[run-now run-prior], Evals::Summary.load_records(d).map { |r| r["run_id"] }.sort
+      assert_equal 3, Evals::Summary.load_records(d, all_versions: true).size
+    end
+  end
+
+  def test_a_frozen_task_refuses_changed_or_unfrozen_inputs
+    Dir.mktmpdir do |root|
+      FileUtils.mkdir_p([File.join(root, "analysis"), File.join(root, "tasks", "t")])
+      File.write(File.join(root, "tasks", "t", "packet.md"), "frozen text")
+      freeze = ->(v) { File.join(root, "analysis", "fam-freeze-v#{v}.json") }
+      File.write(freeze.call(1), JSON.generate({ "sha256" => { "tasks/t/packet.md" => Digest::SHA256.hexdigest("frozen text"), "tasks/t/gone.md" => "0" * 64 } }))
+      task = ->(v) { Evals::Task.new("t", File.join(root, "tasks", "t"), { "task_family" => "fam", "task_version" => v }.compact) }
+      assert_equal ["tasks/t/gone.md"], Evals.frozen_mismatches(task.call(1), root: root), "a listed file that is missing"
+      File.write(File.join(root, "tasks", "t", "packet.md"), "edited text")
+      assert_equal ["tasks/t/packet.md", "tasks/t/gone.md"], Evals.frozen_mismatches(task.call(1), root: root), "an edited file"
+      assert_equal ["fam-freeze-v2.json is missing"], Evals.frozen_mismatches(task.call(2), root: root), "a version with no freeze file"
+      File.write(freeze.call(2), JSON.generate({ "sha256" => { "tasks/t/packet.md" => Digest::SHA256.hexdigest("edited text") } }))
+      assert_empty Evals.frozen_mismatches(task.call(2), root: root), "only the task's own version is checked"
+      assert_empty Evals.frozen_mismatches(task.call(nil), root: root), "a task with no version is not frozen"
+    end
+  end
+
+  def test_public_only_mode_finds_the_example_task_and_says_what_it_skipped
+    out, st = Open3.capture2e({ "EVAL_STORE" => "none" }, RbConfig.ruby, File.expand_path("../bin/verify", __dir__))
+    assert st.success?, out
+    assert_match(/not attached \(public-only mode\)/, out)
+    assert_match(/^SKIP private-task verification: no evidence store is attached/, out)
+    assert_match(/example-review: a complete review passes/, out)
+    ids, = Open3.capture2({ "EVAL_STORE" => "none" }, RbConfig.ruby, "-r", File.expand_path("../lib/eval_support", __dir__), "-e", "puts Evals.task_ids")
+    assert_equal ["example-review"], ids.split
+  end
+
+  def test_a_store_adds_tasks_data_and_config_without_changing_the_checkout
+    Dir.mktmpdir do |store|
+      FileUtils.mkdir_p([File.join(store, "tasks", "private-task"), File.join(store, "hidden", "private-task"), File.join(store, "results")])
+      File.write(File.join(store, "tasks", "private-task", "task.yaml"), "id: private-task\nrepo: elsewhere\npacket: packet.md\n")
+      File.write(File.join(store, "config.local.yaml"), "repos:\n  elsewhere: /nowhere/at/all\n")
+      script = 'puts Evals.task_ids.join(","), Evals.load_task("private-task").hidden_dir, Evals.results_dir, Evals.repo_path("elsewhere"), Evals.data_path("lib/graders.rb"), Evals.load_task("example-review").hidden_dir'
+      out, = Open3.capture2({ "EVAL_STORE" => store }, RbConfig.ruby, "-r", File.expand_path("../lib/eval_support", __dir__), "-e", script)
+      ids, hidden, results, repo, grader, example_hidden = out.split("\n")
+      real = File.realpath(store)
+      assert_equal "example-review,private-task", ids
+      assert_equal File.join(store, "hidden", "private-task"), hidden
+      assert_equal File.join(store, "results"), results
+      assert_equal "/nowhere/at/all", repo
+      assert_equal File.expand_path("../lib/graders.rb", __dir__), grader, "framework files resolve in the checkout (#{real})"
+      assert_equal File.expand_path("../hidden/example-review", __dir__), example_hidden
+    end
+  end
+
+  def test_summary_does_not_touch_the_registry
+    src = File.read(File.expand_path("../lib/summary.rb", __dir__))
+    refute_match(/models\.yaml/, src.lines.reject { |l| l.strip.start_with?("#") }.join)
+  end
+end

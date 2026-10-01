@@ -1,0 +1,55 @@
+# Eval v0 configuration. Data only; see README.md for how runs use it.
+suite_version: eval-v0.3 # v0.3: the read-only guard confines by resolved path (attached option values, symlinks, cwd)
+# Earlier versions whose runs still count as evidence beside the current one.
+# eval-v0.2 differs only in the guard: every Bash command in the stored v0.2
+# traces gets the same allow/deny decision from the v0.3 guard
+# (replayed locally). That covers the commands the evaluated models actually
+# issued; a model that would have tried a command the two guards treat
+# differently could behave differently under v0.3.
+comparable_suite_versions: [eval-v0.2]
+# Version of how stored runs are judged (graders and isolation audit). Runs
+# keep their suite_version (what the model saw); bin/regrade moves them to
+# the current grading_version and keeps earlier judgements in grade_history.
+# grade-v2: isolation-audit-v2 replaces the lexical contamination check.
+# grade-v3: review findings are classed (defect, duplicate, incorrect, process
+# note, valid but out of scope, unclassified); only verified-incorrect findings
+# count as false positives. Records gain task_family and cost_breakdown.
+grading_version: grade-v3
+
+# Source repositories that task workspaces are exported from, by name. None
+# is needed for self-contained (fixture) tasks. Machine paths do not belong
+# here: put them in the evidence store's config.local.yaml, or set
+# EVAL_REPO_<NAME> (for example EVAL_REPO_MYPROJECT=/path/to/repo).
+repos: {}
+
+# Starting acceptance bar for delegated roles (configurable, not a verdict).
+# Raw metrics are always recorded so the rule can change without reruns.
+acceptance:
+  max_pass_rate_drop_vs_reference: 0.05
+  seeded_critical_misses_allowed: 0
+  max_median_repair_loops: 1
+  min_valid_trials: 3 # below this, results are "insufficient evidence"; at or above it, a per-task result is preliminary
+
+# Minimum evidence before a promotion can be recommended, counted separately
+# for each model, effort and role (medium and high are never pooled). Tasks
+# that share a task_family (a defect task and its control) count once.
+promotion:
+  min_valid_samples: 9
+  min_distinct_tasks: 3
+
+# Effort levels an eval may request. Primary-model, xhigh and max experiments
+# are out of scope for v0.
+allowed_efforts: [low, medium, high]
+
+# bin/run prints a projected cost and requires --confirm above this.
+max_trials_without_confirm: 3
+
+# The repair-loop proxy gates only these categories (read-only roles have no
+# repair loop; their failed tool results are searches and harness denials).
+repair_loop_gate_categories: [implementation-clear-spec]
+
+# Monetary cost labels. Nothing here is an actual subscription charge.
+cost_status:
+  measured: "billed amount observed from the provider (not available in v0)"
+  api_equivalent_estimate: "tokens x list price; subscription usage is billed differently"
+  unavailable: "no usable token or price data"

@@ -1,0 +1,70 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# evals/bin/summarize [--candidate MODEL@EFFORT --reference MODEL@EFFORT --task ID]
+#
+# Prints per-(task, host, observed model, observed effort) metrics from
+# results/**/record.json, lists runs excluded from model evidence and who they
+# are attributed to, writes results/summary.json and
+# results/local_eval_evidence.jsonl, and optionally prints a recommendation.
+# It never edits the model registry.
+
+require_relative "../lib/eval_support"
+require_relative "../lib/summary"
+require "optparse"
+
+opts = {}
+OptionParser.new do |o|
+  o.on("--candidate MODEL@EFFORT") { |v| opts[:candidate] = v }
+  o.on("--reference MODEL@EFFORT") { |v| opts[:reference] = v }
+  o.on("--task ID") { |v| opts[:task] = v }
+  o.on("--results DIR") { |v| opts[:dir] = v }
+  o.on("--all-versions", "include runs from earlier suite versions") { opts[:all] = true }
+end.parse!
+
+records = Evals::Summary.load_records(opts[:dir] || Evals.results_dir, all_versions: opts[:all])
+puts "suite #{opts[:all] ? 'all versions' : Evals.config['suite_version']}"
+groups, excluded = Evals::Summary.group(records)
+puts "#{records.size} run(s); #{groups.sum { |g| g['valid_trials'] }} valid as model evidence; #{excluded.size} excluded"
+puts
+puts format("%-26s %-11s %-18s %-7s %3s %5s %8s %9s %10s %s", "task", "host", "model", "effort", "n", "pass", "wall(s)", "cost/ok", "cost", "quality")
+groups.sort_by { |g| g.values_at("task_id", "host", "model") }.each do |g|
+  quality = g.slice("median_recall", "median_precision", "critical_misses", "verdicts_correct", "incorrect_findings", "unclassified_findings", "mechanical_duplicates").compact.map { |k, v| "#{k.sub('median_', '')}=#{v}" }.join(" ")
+  quality += " isolation_unknown=#{g['isolation_unknown_runs']}" if g["isolation_unknown_runs"].to_i.positive?
+  quality += " cwd_unpermitted=#{g['cwd_escape_unpermitted_runs']}" if g["cwd_escape_unpermitted_runs"].to_i.positive?
+  puts format("%-26s %-11s %-18s %-7s %3d %5.2f %8s %9s %10s %s", g["task_id"], g["host"], g["model"], g["effort"], g["valid_trials"],
+              g["pass_rate"], g["median_wall_seconds"], g["cost_per_success_usd"]&.round(4).inspect, g["cost_status"], quality)
+end
+unmatched = records.select { |r| r["valid_for_model_evidence"] && r.dig("grader", "unmatched_findings").to_i.positive? }
+unless unmatched.empty?
+  puts
+  puts "Unclassified review findings (adjudicate against the repository before any promotion decision; they are not counted as incorrect):"
+  unmatched.each do |r|
+    r.dig("grader", "detail").to_a.select { |d| d["class"] == "unclassified" }.each do |d|
+      puts "  #{r['run_id']}: L#{d.dig('finding', 'line')} #{d.dig('finding', 'summary').to_s[0, 140]}"
+    end
+  end
+end
+unless excluded.empty?
+  puts
+  puts "Excluded from model evidence (attributed to the model that ran):"
+  excluded.each { |e| puts "  #{e['run_id']}: attributed to #{e['attributed_to']}; #{e['reasons'].join('; ')}" }
+end
+readiness = Evals::Summary.promotion_readiness(groups)
+unless readiness.empty?
+  puts
+  puts "Promotion minimum: #{readiness.first['needs']}, counted per model, effort and role. Below it a result is preliminary."
+  readiness.sort_by { |x| x.values_at("role", "host", "model", "effort").map(&:to_s) }.each do |x|
+    puts format("  %-15s %-11s %-18s %-7s %2d samples, %d task(s): %s", x["role"], x["host"], x["model"], x["effort"],
+                x["valid_samples"], x["distinct_tasks"], x["status"])
+  end
+end
+FileUtils.mkdir_p(Evals.results_dir)
+File.write(File.join(Evals.results_dir, "summary.json"), JSON.pretty_generate({ "groups" => groups, "promotion_readiness" => readiness, "excluded" => excluded }))
+File.write(File.join(Evals.results_dir, "local_eval_evidence.jsonl"), Evals::Summary.local_eval_entries(groups).map { |e| JSON.generate(e) }.join("\n") + "\n")
+if opts[:candidate] && opts[:reference] && opts[:task]
+  puts
+  puts "Recommendation (not a promotion): #{Evals::Summary.recommend(groups, candidate: opts[:candidate], reference: opts[:reference], task_id: opts[:task])}"
+end
+puts
+puts "Cost figures are API-equivalent estimates unless marked measured; they are not subscription charges."
