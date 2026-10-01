@@ -33,7 +33,7 @@ Args are positional and *each* slot is optional, but the order is: mode → them
 
 # Re-theme an existing brief (same content, new theme):
 /briefme retheme magazine .claude/briefs/research-engineered-2026-05-20-1700.html
-/briefme retheme swiss /Users/wes.burch/.../status-default-...html
+/briefme retheme swiss ~/.../status-default-...html
 ```
 
 ## Procedure
