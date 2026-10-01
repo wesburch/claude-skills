@@ -64,9 +64,12 @@ Full may simplify to standard as dependencies disappear, without restarting.
   it does not automatically restart every check or every review from scratch.
 - Keep long commands in the background when supported. Use completion notices or
   bounded waits; do not repeatedly poll unchanged state or ingest full logs.
-- Preserve a compact handoff only when it prevents rediscovery. Use existing task
-  records; no mandatory state machine, frozen ownership declaration or repeated
-  evidence copying merely because a work package is tracked.
+- Keep one session per engineering objective: the same acceptance criteria or
+  the same unresolved reasoning. Keep settled state durable at milestones so a
+  boundary is cheap. Recommend continuing, compacting or a fresh session; the
+  user ends, clears and compacts sessions. Use existing task records; no
+  mandatory state machine, frozen ownership declaration or repeated evidence
+  copying merely because a work package is tracked.
 
 ## Completion contract
 
@@ -92,6 +95,7 @@ Full may simplify to standard as dependencies disappear, without restarting.
   cover subsequent edits. Wider checks follow risk, not ritual repetition.
 - Report what changed, actual checks, review outcome when applicable, and
   residual uncertainty. Passing tests alone does not prove requirements met.
+  Add a context recommendation only when the next step crosses a boundary.
 
 No mandatory state log, task artifact, knowledge handoff, or human approval
 ceremony. Project gates and authorization still govern merge/deploy/external
@@ -114,6 +118,8 @@ as well; changing the shared skill alone cannot remove a stronger repo override.
 - For repeated failures: routing's bounded recovery; do not repeat an unchanged approach.
 - For a reusable decision or discovery at completion:
   [knowledge-handoff.md](references/knowledge-handoff.md). Routine changes skip it.
+- At a milestone, a new objective, an ownership or runtime change, or stale or
+  contradictory context: [context-lifecycle.md](references/context-lifecycle.md).
 
 Do not load all references, spawn a role roster, or create tracking documents
 just because the skill was invoked.

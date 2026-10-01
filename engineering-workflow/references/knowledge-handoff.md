@@ -6,6 +6,9 @@ Do not search the knowledge base or load another skill just to decide whether
 there is an obvious candidate; final significance/deduplication belongs to
 [project-knowledge](../../project-knowledge/SKILL.md).
 
+This is separate from the session handoff, which carries the next objective to
+a fresh session ([context-lifecycle.md](context-lifecycle.md)).
+
 Preserve its existing field contract; omit empty fields:
 
 | Field | Content |

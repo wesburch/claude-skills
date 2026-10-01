@@ -32,7 +32,7 @@ Give a fresh agent only the context needed to execute:
 - Expected compact return and stop conditions.
 
 Do not attach the full parent transcript. Reviewers receive requirements and
-evidence without depending on the implementer's reasoning narrative. Workers
+evidence, never a session handoff or the implementer's reasoning narrative. Workers
 do not recursively delegate: `wf-*` roles have no delegation tool, and fan-out
 stays with the host.
 Give independent workers non-conflicting ownership; pause host edits to their
@@ -47,6 +47,8 @@ host, which resolves routine choices within the user's existing authorization.
 Return findings/result, changed files, checks and outcomes, evidence pointers,
 residual risks, and any stop condition or decision needed. Keep logs in artifacts
 when large; return the relevant excerpt and location, not the full transcript.
+An explorer whose findings later agents will reuse writes them to a file those
+agents can read, rather than leaving the host to restate them.
 
 ## Independent review
 
@@ -103,3 +105,5 @@ another agent's evidence; spot-check when freshness, trust, or coverage is in do
 If review finds a defect, repair it, refresh affected verification, then return
 the repaired areas to review. If a defect is discovered after final checks,
 the completion claim must wait for the relevant evidence to be refreshed.
+The same reviewer may verify repairs to its own findings. Use a fresh reviewer
+for materially changed scope, a disputed finding, or a new review question.

@@ -40,7 +40,9 @@ and review, just like ordinary findings.
 Use for multi-session recovery, concurrent coordination, or requested audit trails.
 Prefer the project's existing tracker. Otherwise a task artifact under configured
 `task_store` (default `docs/evidence/tasks`) can hold objective, ownership,
-dependencies, latest revision, checks, findings, and next action.
+dependencies, latest revision, checks, findings, open questions, and next action.
+Its next and open state is the session handoff
+([context-lifecycle.md](context-lifecycle.md)); write no second one.
 
 A compact status such as ready / working / checking / reviewing / done / blocked
 is sufficient unless an explicitly applicable project contract requires more.
