@@ -1,0 +1,301 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Deterministic tests for the read-only Bash guard (PreToolUse hook).
+
+Encoding.default_external = Encoding::UTF_8
+Encoding.default_internal = Encoding::UTF_8
+
+require "json"
+require "minitest/autorun"
+require "open3"
+
+GUARD = File.join(File.dirname(File.realpath(__FILE__)), "readonly-bash-guard")
+load GUARD
+
+class ReadonlyBashGuardTest < Minitest::Test
+  ALLOWED = [
+    "ls -la",
+    "ls -la /tmp",
+    "cat README.md",
+    "head -n 40 engineering-workflow/SKILL.md",
+    "sed -n '1,80p' engineering-workflow/SKILL.md",
+    "sed -n '12p' file.txt",
+    "sed -n '1,$p' file.txt",                    # $ inside single quotes is literal
+    "rg -n 'a{2}' src",                          # braces inside quotes are literal
+    "rg -n 'model_routing' engineering-workflow",
+    "rg -n 'a;b|c>d' src",                       # metacharacters inside quotes are data
+    "grep -rn \"TODO\" . 2>/dev/null",
+    "find . -name '*.md' -type f",
+    "git status --porcelain",
+    "git -C /tmp/repo log --oneline -20",
+    "git --no-pager diff HEAD --stat",
+    "git show HEAD:README.md",
+    "git branch --show-current",
+    "git stash list",
+    "git config --get user.name",
+    "git log --oneline | head -20",
+    "rg -l foo | wc -l",
+    "echo explorer-bash-ok",
+    "wc -l engineering-workflow/registry/models.yaml",
+    "codegraph explore \"routing policy\"",
+    "jq '.models | length' cache.json",
+    "stat -f %z file",
+    "diff a.txt b.txt 2>&1"
+  ].freeze
+
+  DENIED = {
+    "touch x.txt" => "allowlist",
+    "rm -rf build" => "allowlist",
+    "mkdir out" => "allowlist",
+    "echo hi > out.txt" => "operator",
+    "echo hi >> out.txt" => "operator",
+    "cat < in.txt" => "operator",
+    "ls; rm x" => "operator",
+    "ls && touch x" => "operator",
+    "ls || touch x" => "not allowed",
+    "sleep 100 &" => "operator",
+    "echo $(touch x)" => "substitution",
+    "echo \"$(touch x)\"" => "substitution",
+    "echo `touch x`" => "substitution",
+    "(touch x)" => "operator",
+    "ls\ntouch x" => "operator",
+    "cat x | tee y" => "allowlist",
+    "ls | xargs rm" => "allowlist",
+    "find . -name '*.tmp' -delete" => "find",
+    "find . -exec rm {} ;" => "not allowed",
+    "find . -exec rm {} +" => "not allowed",
+    "sed -i 's/a/b/' f" => "sed",
+    "sed -n 's/a/b/w out' f" => "sed",
+    "sort -o out.txt in.txt" => "sort",
+    "uniq in.txt out.txt" => "uniq",
+    "rg --pre ./script foo" => "rg --pre",
+    "git checkout -- file" => "not on the read-only allowlist",
+    "git commit -m x" => "not on the read-only allowlist",
+    "git branch -D main" => "listing",
+    "git stash" => "stash list",
+    "git config user.name x" => "--get or --list",
+    "git -c core.pager=touch log" => "option -c",
+    "git diff --output=out.patch" => "--output",
+    "git grep -O foo" => "runs a program",
+    "GIT_DIR=/tmp git status" => "environment",
+    "/bin/rm -rf x" => "path-qualified",
+    "./scripts/test" => "path-qualified",
+    "bash -c 'touch x'" => "allowlist",
+    "python3 script.py" => "allowlist",
+    "ruby -e 'File.write(1,2)'" => "allowlist",
+    "npm test" => "allowlist",
+    "env rm x" => "allowlist",
+    "awk 'BEGIN{system(\"touch x\")}'" => "allowlist",
+    "date -s 2020-01-01" => "clock",
+    "file -C -m magic" => "magic",
+    "codegraph init" => "codegraph",
+    "echo 'unterminated" => "quoting",
+    "" => "empty",
+    # Adversarial forms found in independent review; every one must stay denied.
+    "echo $'\\'' ; echo PWNED ; echo '\\'" => "expansion",
+    "git grep -Otouch foo" => "runs a program",
+    "git grep -Orm foo" => "runs a program",
+    "sort -uo out.txt in.txt" => "output",
+    "sort --compress-program=sh -S 1 in.txt" => "compress-program",
+    "find . ${IFS}-delete" => "expansion",
+    "git log ${IFS}--output=x" => "expansion",
+    "tree -oFILE" => "tree -o",
+    "find . -{delete,}" => "brace",
+    "echo \"$HOME\"" => "expansion",
+    "grep x $PWD/file" => "expansion",
+    "rg --hostname-bin=touch x" => "hostname-bin",
+    "file -bC -m magic" => "magic",
+    "date -us 2020-01-01" => "clock",
+    "git grep --open-files=echo foo" => "abbreviation",
+    "sort --out=/tmp/x /etc/shells" => "abbreviation",
+    "sort --compress=sh in.txt" => "abbreviation",
+    "file --comp x" => "abbreviation",
+    "git show --textconv HEAD:x" => "abbreviation"
+  }.freeze
+
+  def test_allowed_commands
+    ALLOWED.each do |cmd|
+      decision, reason = ReadonlyBashGuard.decide(cmd)
+      assert_equal :allow, decision, "expected allow: #{cmd.inspect} (#{reason})"
+    end
+  end
+
+  def test_denied_commands_with_reasons
+    DENIED.each do |cmd, fragment|
+      decision, reason = ReadonlyBashGuard.decide(cmd)
+      assert_equal :deny, decision, "expected deny: #{cmd.inspect}"
+      assert_match(/#{Regexp.escape(fragment)}/i, reason, "reason for #{cmd.inspect}")
+    end
+  end
+
+  def run_hook(payload)
+    Open3.capture2(RbConfig.ruby, GUARD, stdin_data: JSON.generate(payload))
+  end
+
+  def test_hook_protocol_denies_before_execution
+    out, status = run_hook({ "tool_name" => "Bash", "agent_type" => "wf-explorer",
+                             "tool_input" => { "command" => "touch /tmp/should-not-exist" } })
+    assert status.success?
+    decision = JSON.parse(out)["hookSpecificOutput"]
+    assert_equal "PreToolUse", decision["hookEventName"]
+    assert_equal "deny", decision["permissionDecision"]
+    assert_match(/wf-explorer/, decision["permissionDecisionReason"])
+  end
+
+  def test_hook_protocol_allows_silently
+    out, status = run_hook({ "tool_name" => "Bash", "tool_input" => { "command" => "git status" } })
+    assert status.success?
+    assert_empty out.strip # no decision: normal permissions still apply
+  end
+
+  # Every forbidden long option and each of its abbreviations (3+ chars) must be
+  # denied, so a new allowlist entry cannot reopen the prefix bypass.
+  def test_forbidden_long_options_and_abbreviations_are_denied
+    samples = { "sort" => "sort %s in.txt", "tree" => "tree %s", "date" => "date %s", "file" => "file %s x",
+                "rg" => "rg %s foo", "git" => "git grep %s foo" }
+    ReadonlyBashGuard::FORBIDDEN_LONG.each do |cmd, options|
+      options.each do |opt|
+        (3..opt.length).each do |n|
+          abbrev = opt[0, n]
+          [abbrev, "#{abbrev}=x"].each do |form|
+            command = format(samples.fetch(cmd), form)
+            decision, = ReadonlyBashGuard.decide(command)
+            assert_equal :deny, decision, "expected deny: #{command}"
+          end
+        end
+      end
+    end
+    %w[git\ log\ --out=x git\ diff\ --output-indicator-new=x].each do |cmd|
+      assert_equal :deny, ReadonlyBashGuard.decide(cmd.tr("\\", "")).first
+    end
+  end
+
+  # Confinement is about where a path leads, so these run against a real tree:
+  #   ws/sub/patterns   ws/a.txt   ws/leak -> ../outside   outside/secret
+  def with_tree
+    Dir.mktmpdir("guard-root-") do |tmp|
+      ws = File.join(tmp, "ws")
+      FileUtils.mkdir_p([File.join(ws, "sub"), File.join(tmp, "outside"), File.join(tmp, "wsx")])
+      File.write(File.join(ws, "sub", "patterns"), "p\n")
+      File.write(File.join(ws, "a.txt"), "a\n")
+      File.write(File.join(tmp, "outside", "secret"), "s\n")
+      File.write(File.join(tmp, "wsx", "file"), "x\n")
+      File.symlink("../outside", File.join(ws, "leak"))
+      File.symlink("../outside/secret", File.join(ws, "-x")) # a file whose name starts with a dash
+      File.symlink(ws, File.join(tmp, "alias"))
+      ENV["READONLY_GUARD_ROOT"] = ws
+      yield ws, tmp
+    end
+  ensure
+    ENV.delete("READONLY_GUARD_ROOT")
+  end
+
+  def assert_guard(expected, cmd, cwd)
+    decision, reason = ReadonlyBashGuard.decide(cmd, cwd: cwd)
+    assert_equal expected, decision, "#{cmd} (cwd #{cwd}): #{reason}"
+    assert_match(/workspace|resolved|separate argument/, reason, cmd) if expected == :deny
+  end
+
+  def test_confinement_allows_paths_that_resolve_inside_the_root_however_spelled
+    with_tree do |ws, tmp|
+      ["ls", "cat a.txt", "cat #{ws}/a.txt", "cat #{ws}", "rg foo sub", "git -C #{ws} log --oneline", "grep -rn x . 2>/dev/null",
+       "grep -fsub/patterns x .", "grep -f sub/patterns x .", "grep --file=sub/patterns x .", "grep --file sub/patterns x .",
+       "rg -fsub/patterns .", "cat sub/../a.txt", "cat ./sub/../sub/patterns", "cat /dev/null", "ls sub/*", "ls *.txt",
+       "cat #{tmp}/alias/a.txt", "git -C sub log -- ../a.txt", "head -n5 a.txt", "sed -n '1,5p' a.txt",
+       "find . -name '*.txt' -newer a.txt", "git grep -fsub/patterns", "file -fsub/patterns", "sort -Tsub a.txt",
+       "grep -rnfsub/patterns x .", "jq -f sub/patterns a.txt", "git log -n5 --oneline", "git show HEAD:a.txt", "git log main..HEAD"].each { |cmd| assert_guard(:allow, cmd, ws) }
+      # relative paths resolve against the command's working directory
+      ["cat ../a.txt", "grep -f../sub/patterns x .", "grep --file=patterns x .", "ls .."].each { |cmd| assert_guard(:allow, cmd, File.join(ws, "sub")) }
+    end
+  end
+
+  def test_confinement_denies_paths_that_resolve_outside_the_root_however_spelled
+    with_tree do |ws, tmp|
+      ["cat /etc/passwd", "cat ../outside/secret", "ls ~/", "ls ..", "git -C /Users/x/repo log", "git -C .. log", "ls /",
+       "cat #{tmp}/wsx/file", "cat #{tmp}/outside/secret",
+       "grep -f../outside/secret x .", "grep -f ../outside/secret x .", "grep -f/etc/hosts x .",
+       "grep --file=../outside/secret x .", "grep --file ../outside/secret x .", "rg --file=/etc/hosts x", "rg -f../outside/secret .",
+       "file -f../outside/secret", "jq -f ../outside/secret a.txt", "sort -T../outside a.txt", "diff --from-file=../outside/secret a.txt",
+       "cat sub/../../outside/secret", "cat leak/secret", "grep -fleak/secret x .", "cat .?/outside/secret", "ls .*", "ls *", "cat */secret",
+       "find . -newer ../outside/secret", "sed -n '1,5p' ../outside/secret", "cat --opt=a=/etc/x",
+       # a path is a path wherever it stands and whatever the other options are
+       "grep /etc/passwd -e root", "grep ../outside/secret -f sub/patterns", "rg /etc/passwd -e root", "rg --files /etc",
+       "grep --regex=root /etc/passwd", "grep --reg=root ../outside/secret", "git blame -S /etc/passwd a.txt",
+       "git blame -n --contents=/etc/passwd a.txt", "git blame -S../outside/secret a.txt", "codegraph explore -p /etc query",
+       "file -m sub/patterns:/etc/passwd a.txt", "file -msub/patterns:../outside/secret a.txt", "git grep -f../outside/secret",
+       "grep -rnf../outside/secret x .", "grep -ef../outside/secret a.txt", "cat -P../outside/fstab", "git show HEAD:../outside/secret",
+       # forms zsh expands, and a path inside a jq program
+       "cat =ruby", "head -c 200 =ls", "cat **/secret", "cat ***/secret", "ls sub/**", "cat -- -x",
+       "jq -n 'import \"data\" as $d {search: \"/any/dir\"}; $d'", "jq 'include \"m\" {search: \"/x\"}; .' a.txt",
+       # a symlink is followed before a later ".." is applied, as the kernel does
+       "cat leak/../wsx/file", "cat leak/../outside/secret", "grep -fleak/../wsx/file x .",
+       # an option whose value is optional must not make the guard skip a word
+       "grep --color x ../outside/secret", "git diff -U ../outside/secret",
+       # an attached value this table does not know could be a path: denied
+       "tree -ofoo/bar", "ls -I../x"].each { |cmd| assert_guard(:deny, cmd, ws) }
+      # the same spelling that is inside from the root is outside from deeper down, and the reverse
+      assert_guard(:deny, "cat ../../outside/secret", File.join(ws, "sub"))
+      # the working directory itself must be inside the root
+      assert_guard(:deny, "cat a.txt", tmp)
+      assert_guard(:deny, "ls", tmp)
+      assert_guard(:deny, "cat #{ws}/a.txt", tmp)
+      assert_guard(:deny, "cat ws/../outside/secret", tmp)
+    end
+  end
+
+  # Nothing is skipped: the guard cannot tell a pattern from a path, so text
+  # is allowed only when it would stay inside the root if it were a path.
+  def test_confinement_treats_every_argument_as_a_possible_path
+    with_tree do |ws, _|
+      ["grep fix a.txt", "rg '\\.\\./' .", "git log --grep=fix", "git log -Sfix", "jq '.a' a.txt", "cut -d, -f1 a.txt", "sort -t. -k2 a.txt",
+       "grep -e sub/patterns a.txt", "find . -name '*.txt'",
+       # commands whose operands are text and that read no file
+       "echo ../outside /etc/passwd", "basename /etc/passwd", "dirname ../x"].each { |cmd| assert_guard(:allow, cmd, ws) }
+      ["grep .. a.txt", "grep -e ../x a.txt", "grep /etc/passwd a.txt", "git log --grep=..", "git log -S../x", "cut -d/ -f1 a.txt",
+       "jq '..' a.txt"].each { |cmd| assert_guard(:deny, cmd, ws) }
+    end
+  end
+
+  def test_sed_takes_no_option_after_the_print_script
+    assert_equal :allow, ReadonlyBashGuard.decide("sed -n '1,5p' a.txt").first
+    ["sed -n 1p -i a.txt", "sed -n 1p -e w/tmp/x a.txt", "sed -n 1p --in-place a.txt"].each do |cmd|
+      assert_equal :deny, ReadonlyBashGuard.decide(cmd).first, cmd
+    end
+  end
+
+  def test_confinement_root_spellings_and_edge_roots
+    with_tree do |ws, tmp|
+      ENV["READONLY_GUARD_ROOT"] = File.join(tmp, "alias") # a symlink to the root is the root
+      assert_guard(:allow, "cat #{ws}/a.txt", ws)
+      assert_guard(:deny, "cat leak/secret", ws)
+      ENV["READONLY_GUARD_ROOT"] = "/"
+      assert_guard(:allow, "cat /etc/hosts", ws)
+      ENV["READONLY_GUARD_ROOT"] = ""
+      assert_guard(:allow, "cat ../../etc/hosts", ws)
+    end
+    assert_equal :allow, ReadonlyBashGuard.decide("cat ../../etc/hosts").first, "unset: unchanged"
+  end
+
+  def test_hook_resolves_relative_paths_against_the_session_cwd
+    with_tree do |ws, _|
+      payload = ->(cwd, cmd) { { "tool_name" => "Bash", "cwd" => cwd, "tool_input" => { "command" => cmd } } }
+      out, = Open3.capture2({ "READONLY_GUARD_ROOT" => ws }, RbConfig.ruby, GUARD, stdin_data: JSON.generate(payload.call(ws, "grep -fsub/patterns x .")))
+      assert_equal "", out
+      out, = Open3.capture2({ "READONLY_GUARD_ROOT" => ws }, RbConfig.ruby, GUARD, stdin_data: JSON.generate(payload.call(File.join(ws, "sub"), "cat ../../outside/secret")))
+      assert_equal "deny", JSON.parse(out)["hookSpecificOutput"]["permissionDecision"]
+    end
+  end
+
+  def test_malformed_hook_input_is_denied
+    out, status = Open3.capture2(RbConfig.ruby, GUARD, stdin_data: "{not json")
+    assert status.success?
+    assert_equal "deny", JSON.parse(out)["hookSpecificOutput"]["permissionDecision"]
+  end
+
+  def test_hook_ignores_other_tools
+    out, status = run_hook({ "tool_name" => "Read", "tool_input" => { "file_path" => "x" } })
+    assert status.success?
+    assert_empty out.strip
+  end
+end

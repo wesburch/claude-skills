@@ -1,0 +1,494 @@
+# Current model registry: DATA ONLY.
+#
+# Stable policy (task shape -> capability class -> effort tier -> gates) lives in
+# ../references/routing.md and names no models. This file maps classes to the
+# models that currently satisfy them. Update it, never the workflow, when a
+# model ships, retires, changes price or access, or gains evidence.
+#
+# Check drift/staleness (warn-only):  ../scripts/model-routing check
+# Resolve a delegate for a class:      ../scripts/model-routing resolve --class <class>
+#
+# Status (routing status, independent of the vendor's lifecycle):
+#   promoted  - eligible for automatic selection in the classes that list it in `order`
+#   candidate - known; never auto-selected until local-eval evidence or an
+#               explicit user choice promotes it (move it into `order`)
+#   legacy    - callable, not selected for new work
+#   retired   - no longer callable on the named host
+#
+# Two separate things are recorded about a model's standing:
+#   vendor_lifecycle - what the VENDOR says, and nothing else:
+#       current     - in the vendor's current lineup
+#       listed      - on the vendor's model pages with no legacy or
+#                     deprecation label, but not in the current lineup
+#       legacy      - the vendor calls it legacy
+#       deprecated  - the vendor has announced its retirement
+#     Record only a label the vendor's pages support; cite the page.
+#   workflow_status  - OUR view, independent of the vendor's:
+#       transitional - occupies a class today for lack of an accessible,
+#                      evidenced alternative; expected to be replaced when
+#                      one clears the promotion bar. Routing is unaffected:
+#                      `status` alone decides selection.
+#
+# Evidence tags: FIRST_PARTY, BENCHMARK, PRACTITIONER, PERSONAL, LOCAL_EVAL
+# Confidence:    verified, plausible, anecdotal, unknown
+# A behavior dimension without an evidence entry is `unknown`: leave it absent
+# rather than guessing.
+
+schema_version: 1
+last_reviewed: 2026-09-30
+refresh:
+  max_age_days: 30
+  triggers: [vendor_release, cli_update, registry_check_drift]
+
+behavior_dimensions:
+  - autonomy
+  - ambiguity_tolerance
+  - instruction_adherence
+  - coding
+  - repo_exploration
+  - debugging
+  - architecture
+  - code_review
+  - research
+  - tool_use
+  - computer_use
+  - long_context
+  - long_horizon
+  - prompt_sensitivity
+  - over_engineering
+  - premature_stop
+  - delegation
+  - latency
+  - token_consumption
+
+# Policy effort tiers -> default model level. A model's `effort_map` overrides
+# per tier because levels are recalibrated between model generations.
+effort_tiers:
+  light: low
+  standard: medium
+  deep: high
+  extended: xhigh # gated: requires an escalation record (routing.md)
+# `max` and `ultra` are not tiers: never selected automatically.
+
+hosts:
+  claude-code:
+    detect_env: [CLAUDECODE]
+    cli: [claude, $CLAUDE_CODE_EXECPATH]
+    discovery:
+      listed: Agent tool `model` enum (family aliases); `/model` picker
+      alias_resolution: installed CLI version against `aliases` below
+      observed: "`/tasks` shows each subagent's model and effort"
+      api: GET /v1/models (requires an API key; not used during workflow)
+    model_precedence: [per-invocation model (aliases only), agent frontmatter model, CLAUDE_CODE_SUBAGENT_MODEL, main session model]
+    effort_control: agent frontmatter `effort` (no per-invocation effort; overrides the session level)
+    fallback_behavior: "From 2.1.286, a refused model retries once on the previous model of the same tier: configured is not observed"
+    read_only_enforcement: "fail-closed PreToolUse Bash guard (engineering-workflow/scripts/readonly-bash-guard) on read-only roles; permissionMode plan did not stop Bash writes under auto or bypass parents (smoke test 2026-09-30). Verified in fresh headless sessions (2.1.284 and 2.1.286); a desktop session running before install did not apply it"
+    observation: {model_and_effort: "subagent transcript ~/.claude/projects/<cwd>/<session>/subagents/*.jsonl (model, effort)", usage: "claude -p --output-format json modelUsage"}
+    last_discovery: {date: 2026-09-30, cli: {claude: 2.1.286, desktop: 2.1.284}}
+    aliases: # ascending by min_cli; the last entry whose min_cli <= installed version applies
+      opus:
+        - {min_cli: 0.0.0, model: claude-opus-5}
+        - {min_cli: 2.1.280, model: claude-opus-5-5}
+      sonnet:
+        - {min_cli: 0.0.0, model: claude-sonnet-5}
+        - {min_cli: 2.1.284, model: claude-sonnet-5-5}
+      haiku:
+        - {min_cli: 0.0.0, model: claude-haiku-4-5-20251001}
+      fable:
+        - {min_cli: 2.1.257, model: claude-fable-5-1}
+    sources:
+      - https://code.claude.com/docs/en/model-config
+      - https://code.claude.com/docs/en/sub-agents
+  codex:
+    detect_env: [CODEX_THREAD_ID, CODEX_SANDBOX]
+    cli: [codex]
+    discovery:
+      accessible: ~/.codex/models_cache.json (account catalog; entries with visibility=list)
+      listed: codex debug models --bundled (catalog shipped with the installed binary)
+      observed: "`/agent` thread view; `codex exec --json` events"
+    model_precedence: [custom agent file model, explicit spawn value, "[agents] default_subagent_model", parent model]
+    effort_control: custom agent file model_reasoning_effort; "[agents] default_subagent_reasoning_effort"; spawn value
+    delegate_service_tier: default # explicit standard routing; overrides the catalog default_service_tier
+    delegate_mechanism: "engineering-workflow/scripts/codex-delegate: headless codex exec with --ignore-user-config, --ignore-rules, hooks and multi_agent disabled, and explicit model, effort, service_tier, sandbox, approvals never"
+    in_process_children: "not isolated: inherit the parent's live service tier and sandbox overrides (smoke test 2026-09-30); not used for workflow roles"
+    installed_roles: "real copies in ~/.codex/agents (Codex does not load symlinked agent files)"
+    observation:
+      model_effort_sandbox: rollout turn_context (~/.codex/sessions/**/*<thread_id>.jsonl)
+      service_tier: "RUST_LOG=codex_exec=info,codex_otel=info: SessionConfiguredEvent and response.completed telemetry (request level; the server response field reported default for a priority request)"
+    catalog_default_service_tier: priority # the Codex catalog's default for every model, observed 2026-09-30
+    last_discovery:
+      date: 2026-09-30
+      cli: 0.159.2
+      bundled: [gpt-6-astra, gpt-6.1-sol, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5]
+    ignored_catalog_ids: [codex-auto-review, gpt-daybreak-blue-latest, gpt-daybreak-red-latest] # shipped in the bundled catalog; not routing candidates
+    sources:
+      - https://learn.chatgpt.com/docs/agent-configuration/subagents
+      - https://learn.chatgpt.com/docs/agent-configuration/speed
+      - https://github.com/openai/codex/blob/main/codex-rs/protocol/src/config_types.rs (SERVICE_TIER_DEFAULT_REQUEST_VALUE)
+
+classes:
+  efficient-bounded:
+    claude-code:
+      order: [{model: claude-sonnet-5, tier: light}]
+      candidates:
+        - {model: claude-sonnet-5-5, tier: light}
+        - {model: claude-haiku-4-5-20251001, note: "no effort control; vendor retirement not before 2026-10-15"}
+    codex:
+      order: [{model: gpt-5.6-luna, tier: light}]
+      candidates: [{model: gpt-6-luna, tier: light}]
+    upward_fallback: capable-delegated
+  capable-delegated:
+    claude-code:
+      order: [{model: claude-sonnet-5, tier: standard}]
+      candidates: [{model: claude-sonnet-5-5, tier: standard}]
+    codex:
+      order:
+        - {model: gpt-5.6-terra, tier: standard}
+        - {model: gpt-5.6-sol, tier: standard}
+      candidates: [{model: gpt-6.1-sol, tier: standard}]
+    upward_fallback: frontier-judgment
+  frontier-judgment:
+    claude-code:
+      order: [{model: claude-opus-5-5, tier: deep}]
+      candidates: [{model: claude-fable-5-1, tier: deep}]
+    codex:
+      order:
+        - {model: gpt-6-astra, tier: deep}
+        - {model: gpt-5.6-sol, tier: deep}
+      candidates: []
+  primary-interactive:
+    policy: user_choice # never auto-selected or auto-downgraded
+    current_preference:
+      claude-code: {model: claude-opus-5-5, alias: opus, effort: high}
+      codex: {model: gpt-6-astra, effort: high, service_tier: user_choice}
+
+# Bar a candidate must clear on local evals before promotion is proposed.
+# Among passing models, prefer the lowest cost per successful task.
+promotion:
+  requires_one_of: [local_eval, explicit_user_choice]
+  local_eval_bar:
+    min_sample_size: 9 # valid samples for one model, effort and role; efforts are never pooled
+    min_distinct_tasks: 3 # meaningfully different tasks; three trials on one task are preliminary
+    max_pass_rate_drop_vs_incumbent: 0.05
+    max_median_repair_loops: 1
+    min_seeded_defect_recall: 1.0 # review categories: zero critical misses
+  metric: cost_per_success_usd
+
+# Reusable delegate roles. Agent files under ../../agents/ must match these
+# values; `model-routing check` reports drift. Effort is set here, never inherited.
+# A role changes to another role only through `escalates_to`, so an escalated
+# assignment keeps its tool access; otherwise the role keeps its definition and
+# the resolver supplies an explicit model.
+roles:
+  wf-explorer:
+    class: efficient-bounded
+    access: read-only
+    claude-code: {model: claude-sonnet-5, effort: low}
+    codex: {model: gpt-5.6-luna, effort: low, sandbox_mode: read-only, service_tier: default}
+  wf-implementer:
+    class: capable-delegated
+    access: workspace-write
+    claude-code: {model: claude-sonnet-5, effort: medium}
+    codex: {model: gpt-5.6-terra, effort: medium, sandbox_mode: workspace-write, service_tier: default}
+  wf-reviewer:
+    class: capable-delegated
+    access: read-only
+    escalates_to: wf-reviewer-deep
+    claude-code: {model: claude-sonnet-5, effort: medium}
+    codex: {model: gpt-5.6-terra, effort: medium, sandbox_mode: read-only, service_tier: default}
+  wf-reviewer-deep:
+    class: frontier-judgment
+    access: read-only
+    claude-code: {model: claude-opus-5-5, effort: high}
+    codex: {model: gpt-6-astra, effort: high, sandbox_mode: read-only, service_tier: default}
+
+# local_eval entry schema (none recorded yet):
+#   - {category, class, host, effort, date, sample_size, pass_rate,
+#      median_cost_usd, cost_per_success_usd,
+#      median_tokens: {input, cached_input, output},
+#      median_repair_loops, median_wall_seconds, human_interventions,
+#      unrelated_edits, seeded_defect: {recall, precision}, evidence_ref}
+
+models:
+  # ---------------- Anthropic ----------------
+  - id: claude-opus-5-5
+    provider: anthropic
+    hosts: [claude-code, api]
+    aliases: [opus]
+    released: 2026-09-22
+    vendor_lifecycle: current
+    status: promoted
+    price_usd_per_mtok: {input: 4, output: 20, cache_read: 0.20}
+    context_tokens: 1000000
+    max_output_tokens: 128000
+    effort: {levels: [low, medium, high, xhigh, max], default: {api: medium, claude-code: medium}}
+    min_cli: {claude-code: 2.1.280}
+    behavior:
+      premature_stop:
+        - {claim: "In unattended runs can end the turn with a progress report before the work is done", tag: FIRST_PARTY, confidence: verified, source: "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5"}
+      delegation:
+        - {claim: "Reluctant to spawn subagents unless told it may", tag: PRACTITIONER, confidence: anecdotal, source: "Theo (t3.gg), secondary summary"}
+      coding:
+        - {claim: "Terminal-Bench 4.0 65.15% (#1 at eval date)", tag: BENCHMARK, confidence: verified, source: "https://www.vals.ai", date: 2026-09-22}
+    evidence:
+      - {claim: "Vendor: default effort medium; run an effort sweep rather than carry settings over", tag: FIRST_PARTY, confidence: verified, source: "https://platform.claude.com/docs/en/build-with-claude/effort"}
+    local_eval: []
+    sources: ["https://platform.claude.com/docs/en/about-claude/models/overview"]
+    last_verified: 2026-09-30
+
+  - id: claude-sonnet-5-5
+    provider: anthropic
+    hosts: [claude-code, api]
+    aliases: [sonnet]
+    released: 2026-09-28
+    vendor_lifecycle: current
+    status: candidate
+    price_usd_per_mtok: {input: 2, output: 10}
+    context_tokens: 1000000
+    max_output_tokens: 128000
+    effort: {levels: [low, medium, high, xhigh, max], default: {api: high, claude-code: medium}}
+    min_cli: {claude-code: 2.1.284}
+    behavior:
+      over_engineering:
+        - {claim: "Adds tests and docs nobody asked for at every effort level", tag: FIRST_PARTY, confidence: verified, source: "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-sonnet-5-5"}
+      premature_stop:
+        - {claim: "Sometimes checks in early at low or medium effort", tag: FIRST_PARTY, confidence: verified, source: "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-sonnet-5-5"}
+      delegation:
+        - {claim: "At xhigh and max launches its own review rounds, sometimes with subagents", tag: FIRST_PARTY, confidence: verified, source: "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-sonnet-5-5"}
+      coding:
+        - {claim: "Vals Index 67.04% (#1), Code Migration 69.83% (#1), Terminal-Bench 4.0 64.14%", tag: BENCHMARK, confidence: verified, source: "https://www.vals.ai", date: 2026-09-28}
+    evidence:
+      - {claim: "Vendor effort guidance: medium for well-specified agentic coding, high for harder or longer tasks", tag: FIRST_PARTY, confidence: verified, source: "https://platform.claude.com/docs/en/build-with-claude/effort"}
+    local_eval: []
+    sources: ["https://platform.claude.com/docs/en/about-claude/models/overview"]
+    last_verified: 2026-09-30
+
+  - id: claude-sonnet-5
+    provider: anthropic
+    hosts: [claude-code, api]
+    aliases: [sonnet] # on Claude Code < 2.1.284
+    released: 2026-07-01
+    vendor_lifecycle: legacy
+    status: promoted
+    price_usd_per_mtok: {input: 2, output: 10}
+    context_tokens: 1000000
+    max_output_tokens: 128000
+    effort: {levels: [low, medium, high, xhigh, max], default: {api: high, claude-code: high}}
+    evidence:
+      - {claim: "Independent reviewer (medium, tools disabled) for the 2026-09-17 workflow change; APPROVED with one finding", tag: PERSONAL, confidence: verified, source: "claude-skills commit 41d6be2"}
+    local_eval: []
+    sources: ["https://platform.claude.com/docs/en/release-notes/overview"]
+    last_verified: 2026-09-30
+
+  - id: claude-fable-5-1
+    provider: anthropic
+    hosts: [claude-code, api]
+    aliases: [fable]
+    released: 2026-09-01
+    vendor_lifecycle: current
+    status: candidate
+    price_usd_per_mtok: {input: 10, output: 50, cache_read: 0.25}
+    context_tokens: 1000000
+    max_output_tokens: 128000
+    effort: {levels: [low, medium, high, xhigh, max], default: {api: high}}
+    min_cli: {claude-code: 2.1.257}
+    behavior:
+      token_consumption:
+        - {claim: "About 78K output tokens per Coding Agent Index task", tag: BENCHMARK, confidence: verified, source: "https://artificialanalysis.ai", date: 2026-09-09}
+    evidence:
+      - {claim: "Vendor: for demanding reasoning and long-horizon work, or when Opus 5.5 at higher effort falls short", tag: FIRST_PARTY, confidence: verified, source: "https://platform.claude.com/docs/en/about-claude/models/overview"}
+    local_eval: []
+    last_verified: 2026-09-30
+
+  - id: claude-haiku-4-5-20251001
+    provider: anthropic
+    hosts: [claude-code, api]
+    aliases: [haiku, claude-haiku-4-5]
+    released: 2025-10-15
+    vendor_lifecycle: current
+    retirement: "not sooner than 2026-10-15"
+    status: candidate
+    price_usd_per_mtok: {input: 1, output: 5}
+    context_tokens: 200000
+    max_output_tokens: 64000
+    effort: {levels: [], note: effort parameter not supported}
+    local_eval: []
+    last_verified: 2026-09-30
+
+  - id: claude-opus-5
+    provider: anthropic
+    hosts: [claude-code, api]
+    aliases: [opus] # on Claude Code < 2.1.280
+    released: 2026-07-24
+    vendor_lifecycle: legacy
+    status: legacy
+    price_usd_per_mtok: {input: 5, output: 25}
+    effort: {levels: [low, medium, high, xhigh, max], default: {api: high}}
+    local_eval: []
+    last_verified: 2026-09-30
+
+  # ---------------- OpenAI ----------------
+  - id: gpt-6-astra
+    provider: openai
+    hosts: [codex, api]
+    aliases: []
+    released: 2026-09-03
+    vendor_lifecycle: current
+    status: promoted
+    price_usd_per_mtok: {input: 10, output: 50, cache_read: 1.00}
+    context_tokens: {api: 1050000, codex_default: 272000, codex_max: 872000}
+    max_output_tokens: 128000
+    effort: {levels: [low, medium, high, xhigh, max, ultra], default: {codex: low}}
+    catalog_default_service_tier: priority # applies unless service_tier is set explicitly
+    behavior:
+      ambiguity_tolerance:
+        - {claim: "Asks more clarifying questions; can stop where reasonable assumptions were expected", tag: FIRST_PARTY, confidence: verified, source: "https://developers.openai.com/api/docs/guides/latest-model"}
+      prompt_sensitivity:
+        - {claim: "More sensitive to instructions in skills and AGENTS.md; audit those files", tag: FIRST_PARTY, confidence: verified, source: "https://developers.openai.com/api/docs/guides/latest-model"}
+      delegation:
+        - {claim: "May delegate less often than desired; say when to use subagents", tag: FIRST_PARTY, confidence: verified, source: "https://developers.openai.com/api/docs/guides/latest-model"}
+      over_engineering:
+        - {claim: "Over-engineers when given review feedback", tag: PRACTITIONER, confidence: anecdotal, source: "Theo (t3.gg), secondary summary"}
+      token_consumption:
+        - {claim: "About 27K output tokens per Coding Agent Index task", tag: BENCHMARK, confidence: verified, source: "https://artificialanalysis.ai", date: 2026-09-09}
+      coding:
+        - {claim: "Terminal-Bench 4.0 59.60%", tag: BENCHMARK, confidence: verified, source: "https://www.vals.ai", date: 2026-09-03}
+    evidence:
+    local_eval: []
+    sources: ["https://developers.openai.com/api/docs/models/gpt-6-astra", "https://learn.chatgpt.com/docs/models"]
+    last_verified: 2026-09-30
+
+  - id: gpt-6.1-sol
+    provider: openai
+    hosts: [codex, api]
+    aliases: []
+    released: 2026-09-29
+    vendor_lifecycle: current
+    status: candidate
+    price_usd_per_mtok: {input: 2, output: 10, cache_read: 0.10}
+    context_tokens: 1050000
+    max_output_tokens: 128000
+    effort: {levels: [low, medium, high, xhigh, max], default: {api: medium}}
+    min_cli: {codex: 0.159.1}
+    evidence:
+      - {claim: "Near-Astra performance for complex work at a lower cost", tag: FIRST_PARTY, confidence: plausible, source: "https://developers.openai.com/api/docs/models/gpt-6.1-sol"}
+      - {claim: "Codex docs: start here for most tasks where the account has access", tag: FIRST_PARTY, confidence: verified, source: "https://learn.chatgpt.com/docs/agent-configuration/subagents"}
+      - {claim: "Independent coding benchmarks", tag: BENCHMARK, confidence: unknown}
+    local_eval: []
+    access: {listed: "codex 0.159.2 bundled catalog"} # access is per account; the resolver reads the live catalog
+    last_verified: 2026-09-30
+
+  - id: gpt-6-luna
+    provider: openai
+    hosts: [codex, api]
+    aliases: []
+    released: 2026-09-22
+    vendor_lifecycle: current
+    status: candidate
+    price_usd_per_mtok: {input: 0.10, output: 0.50, cache_read: 0.01}
+    context_tokens: 1050000
+    max_output_tokens: 128000
+    effort: {levels: [none, low, medium, high, xhigh, max], default: {api: medium}}
+    effort_map: {light: medium, standard: high, deep: high} # OpenAI: start Luna at high for explicit settings
+    min_cli: {codex: 0.157.0}
+    behavior:
+      repo_exploration:
+        - {claim: "Suggested for fast scans and explorer subagents", tag: FIRST_PARTY, confidence: verified, source: "https://learn.chatgpt.com/docs/agent-configuration/subagents"}
+      coding:
+        - {claim: "Fast and competent at SQL and HTML/JS in a demo agent", tag: PRACTITIONER, confidence: anecdotal, source: "https://simonwillison.net/2026/Sep/22/opus-and-sol-and-luna/"}
+    local_eval: []
+    access: {listed: "codex 0.159.2 bundled catalog"} # access is per account; the resolver reads the live catalog
+    last_verified: 2026-09-30
+
+  - id: gpt-6-sol
+    provider: openai
+    hosts: [codex, api]
+    aliases: []
+    released: 2026-09-22
+    vendor_lifecycle: current
+    status: legacy # superseded by gpt-6.1-sol a week later
+    price_usd_per_mtok: {input: 2, output: 10, cache_read: 0.20}
+    context_tokens: 1050000
+    effort: {levels: [none, low, medium, high, xhigh, max], default: {api: medium}}
+    min_cli: {codex: 0.157.0}
+    local_eval: []
+    access: {listed: "codex 0.159.2 bundled catalog"} # access is per account; the resolver reads the live catalog
+    last_verified: 2026-09-30
+
+  - id: gpt-5.6-sol
+    provider: openai
+    hosts: [codex, api]
+    aliases: [gpt-5.6]
+    released: "2026-07" # month only; day not verified
+    vendor_lifecycle: listed # on OpenAI's model pages with no legacy or deprecation label; not on the deprecations page (verified 2026-10-01)
+    workflow_status: transitional # previous generation; kept while no newer accessible model has local evidence
+    status: promoted
+    price_usd_per_mtok: {input: 4, output: 20, cache_read: 0.40}
+    context_tokens: {codex_default: 272000}
+    effort: {levels: [low, medium, high, xhigh, max, ultra], default: {codex: medium}}
+    evidence:
+      - {claim: "Prior preferred strong/balanced candidate (registry snapshot 2026-09-09)", tag: PERSONAL, confidence: plausible, source: "claude-skills commit cf27ac1"}
+    catalog_default_service_tier: priority
+    local_eval: []
+    sources: ["https://developers.openai.com/api/docs/models/gpt-5.6-sol", "https://developers.openai.com/api/docs/deprecations"]
+    last_verified: 2026-10-01
+
+  - id: gpt-5.6-terra
+    provider: openai
+    hosts: [codex, api]
+    aliases: []
+    released: "2026-07" # month only; day not verified
+    vendor_lifecycle: listed # on OpenAI's model pages with no legacy or deprecation label; not on the deprecations page (verified 2026-10-01)
+    workflow_status: transitional # previous generation; kept while no newer accessible model has local evidence
+    status: promoted
+    price_usd_per_mtok: {input: 2, output: 12, cache_read: 0.20}
+    context_tokens: {codex_default: 272000}
+    effort: {levels: [low, medium, high, xhigh, max, ultra], default: {codex: medium}}
+    evidence:
+      - {claim: "Prior preferred balanced candidate (registry snapshot 2026-09-09)", tag: PERSONAL, confidence: plausible, source: "claude-skills commit cf27ac1"}
+    catalog_default_service_tier: priority
+    local_eval: []
+    sources: ["https://developers.openai.com/api/docs/models/gpt-5.6-terra", "https://developers.openai.com/api/docs/deprecations"]
+    last_verified: 2026-10-01
+
+  - id: gpt-5.6-luna
+    provider: openai
+    hosts: [codex, api]
+    aliases: []
+    released: "2026-07" # month only; day not verified
+    vendor_lifecycle: listed # on OpenAI's model pages with no legacy or deprecation label; not on the deprecations page (verified 2026-10-01)
+    workflow_status: transitional # previous generation; kept while no newer accessible model has local evidence
+    status: promoted
+    price_usd_per_mtok: {input: 0.20, output: 1.20, cache_read: 0.02}
+    context_tokens: {codex_default: 272000}
+    effort: {levels: [low, medium, high, xhigh, max], default: {codex: medium}}
+    evidence:
+      - {claim: "Prior preferred small/fast candidate (registry snapshot 2026-09-09)", tag: PERSONAL, confidence: plausible, source: "claude-skills commit cf27ac1"}
+    catalog_default_service_tier: priority
+    local_eval: []
+    sources: ["https://developers.openai.com/api/docs/models/gpt-5.6-luna", "https://developers.openai.com/api/docs/deprecations"]
+    last_verified: 2026-10-01
+
+  - id: gpt-5.5
+    provider: openai
+    hosts: [codex, api]
+    aliases: []
+    released: "2026-04" # month only
+    vendor_lifecycle: legacy
+    retirement: "leaves ChatGPT and Codex 2026-10-14; API unaffected"
+    status: legacy
+    price_usd_per_mtok: {input: 5, output: 30, cache_read: 0.50}
+    effort: {levels: [low, medium, high, xhigh], default: {codex: xhigh}}
+    catalog_default_service_tier: priority
+    local_eval: []
+    last_verified: 2026-09-30
+
+  - id: gpt-5.4
+    provider: openai
+    hosts: [codex, api]
+    aliases: []
+    vendor_lifecycle: legacy
+    status: legacy
+    note: dropped from the Codex bundled catalog in 0.159.2 and absent from the account catalog
+    local_eval: []
+    last_verified: 2026-09-30

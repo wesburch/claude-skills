@@ -1,0 +1,384 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# PreToolUse hook for read-only workflow roles (wf-explorer, wf-reviewer,
+# wf-reviewer-deep). Allows a Bash command only when every part of it is a
+# known read-only inspection command; everything else is denied BEFORE it runs,
+# with a reason the agent can act on. Deny is the default.
+#
+# Input: Claude Code PreToolUse JSON on stdin. Output: nothing (allow; normal
+# permissions still apply) or a JSON deny decision. Also usable directly:
+#   readonly-bash-guard --check "<command>" [--cwd DIR]   # prints allow/deny + reason
+#
+# Optional confinement: with READONLY_GUARD_ROOT set to a directory, a command
+# is also denied when any path it names resolves outside that directory (see
+# "confinement" below). Unset or empty, confinement is not applied. The
+# guard is one layer: it refuses at dispatch. It does not replace an OS
+# sandbox, and a run's isolation audit checks what actually happened.
+
+Encoding.default_external = Encoding::UTF_8
+Encoding.default_internal = Encoding::UTF_8
+
+require "json"
+require "shellwords"
+
+module ReadonlyBashGuard
+  # Commands that only read. Per-command argument rules below tighten some.
+  SIMPLE = %w[
+    ls cat head tail wc file stat pwd echo printf grep egrep fgrep rg tree du df
+    which realpath dirname basename diff cmp cut tr jq date uname id whoami nl
+    column md5 shasum sha256sum sha1sum true false test
+  ].freeze
+
+  GIT_READ = %w[
+    status log show diff blame rev-parse ls-files ls-tree grep cat-file describe
+    shortlog merge-base rev-list name-rev show-ref for-each-ref
+  ].freeze
+
+  # Long options that write files or run programs, per command. getopt_long and
+  # git accept any unambiguous prefix, so every prefix of 3+ characters counts.
+  FORBIDDEN_LONG = {
+    "sort" => %w[--output --compress-program],
+    "tree" => %w[--output],
+    "date" => %w[--set],
+    "file" => %w[--compile],
+    "rg" => %w[--pre --hostname-bin],
+    "git" => %w[--output --ext-diff --open-files-in-pager --textconv]
+  }.freeze
+
+  # Stripped before analysis: harmless stderr handling only.
+  HARMLESS_REDIRECTS = [%r{(?<=\s)2>\s*/dev/null(?=\s|\z)}, %r{(?<=\s)2>&1(?=\s|\z)}].freeze
+
+  module_function
+
+  def decide(command, cwd: Dir.pwd)
+    return deny("empty command") if command.nil? || command.strip.empty?
+    cmd = command.dup
+    HARMLESS_REDIRECTS.each { |re| cmd = cmd.gsub(re, " ") }
+    segments, problem = split_pipeline(cmd)
+    return deny(problem) if problem
+    segments.each do |seg|
+      words = begin
+        Shellwords.split(seg)
+      rescue ArgumentError
+        return deny("unbalanced quoting")
+      end
+      return deny("empty pipeline segment") if words.empty?
+      reason = check_words(words, cwd)
+      return deny(reason) if reason
+    end
+    [:allow, nil]
+  end
+
+  def deny(reason)
+    [:deny, reason]
+  end
+
+  # Splits on unquoted single pipes; rejects shell composition that can run or
+  # write anything: ; & && || > < ( ) newlines, backticks, any $ expansion
+  # outside single quotes ($VAR, ${...}, $(...), $'...'), and brace expansion.
+  def split_pipeline(cmd)
+    segments = []
+    buf = +""
+    quote = nil
+    i = 0
+    while i < cmd.length
+      c = cmd[i]
+      nxt = cmd[i + 1]
+      if quote == "'"
+        quote = nil if c == "'"
+        buf << c
+      elsif c == "\\"
+        buf << c << nxt.to_s
+        i += 1
+      elsif c == "`" || (c == "$" && nxt == "(")
+        return [nil, "command substitution is not allowed"]
+      elsif c == "$"
+        return [nil, "shell expansion ($) is not allowed outside single quotes"]
+      elsif quote == '"'
+        quote = nil if c == '"'
+        buf << c
+      elsif c == "'" || c == '"'
+        quote = c
+        buf << c
+      elsif c == "|"
+        return [nil, "|| and |& are not allowed"] if nxt == "|" || nxt == "&"
+        segments << buf
+        buf = +""
+      elsif "{}".include?(c) && quote.nil?
+        return [nil, "brace expansion is not allowed; quote literal braces"]
+      elsif ";&<>()\n".include?(c)
+        return [nil, "shell operator #{c.inspect} is not allowed (one read-only command or a pipeline of them)"]
+      else
+        buf << c
+      end
+      i += 1
+    end
+    return [nil, "unbalanced quoting"] if quote
+    segments << buf
+    [segments.map(&:strip), nil]
+  end
+
+  # ------------------------------------------------------------ confinement
+  #
+  # With READONLY_GUARD_ROOT set, a command is denied when anything in it
+  # could name a path that leads outside that root. The rule is about where a
+  # path leads, not how it is spelled: each candidate is resolved against the
+  # command's working directory one component at a time, following every
+  # symlink before applying a later "..", and the result is compared with the
+  # root. So `sub/../file`, `-fsub/patterns` and `--file=sub/patterns` are
+  # allowed, and `../outside`, `-f../outside`, `~/x`, a symlink that leaves
+  # the root and `link/../x` through such a symlink are denied.
+  #
+  # Nothing is ever skipped. A table saying "this word is a pattern, not a
+  # path" is one wrong entry away from letting a path through, so every word,
+  # every `=` or `:` separated piece and every value attached to an option is
+  # treated as a possible path. The cost is that text which resolves outside
+  # the root is denied too (`grep /etc/passwd file` as a pattern, `cut -d/`).
+  #
+  # Knowledge is only ever used to check more precisely, never less. For an
+  # attached short-option value the guard has to know where the option ends:
+  # in `-fsub/patterns` the value is `sub/patterns`, not `/patterns`.
+  # PATH_OPTION lists short options that certainly take a value; the text
+  # after one is the candidate. Without such a letter every suffix of the
+  # word is a candidate, which denies when in doubt.
+  #
+  # Commands run under the user's shell, which is often zsh, so the forms zsh
+  # expands are refused where the guard cannot follow them: a word starting
+  # with `=` (`=ls` is the path of ls), and `**` (recursive, and with `***`
+  # symlink-following, globs). A jq program that imports or includes a module
+  # is refused too, since the module path is inside the program text.
+  #
+  # Limits, left to the OS sandbox: files named inside a list file
+  # (`--files0-from`) or a jq program file, and symlinks met while a command
+  # recurses (`grep -R`).
+  PATH_OPTION = { "grep" => "f", "egrep" => "f", "fgrep" => "f", "rg" => "f", "file" => "fm", "jq" => "fL", "sort" => "T" }.freeze
+  TEXT_ONLY = %w[echo printf basename dirname tr true false].freeze # operands are text; these read no files
+  GLOB = /[*?\[]/
+  MAX_LINKS = 40
+
+  def inside?(path, root)
+    root == "/" || path == root || path.start_with?("#{root}/")
+  end
+
+  # Where a path leads, resolved the way the kernel does: left to right, a
+  # symlink replaced by its target before the next component is applied.
+  # Components that do not exist are kept as written. nil if unresolvable.
+  def canonical(path, cwd, links = 0)
+    path = File.expand_path(path) if path.start_with?("~")
+    cur = path.start_with?("/") ? "/" : canonical(cwd, "/", links)
+    return nil unless cur
+    path.split("/").each do |part|
+      next if part.empty? || part == "."
+      if part == ".."
+        cur = File.dirname(cur)
+        next
+      end
+      cur = File.join(cur, part)
+      next unless File.symlink?(cur)
+      return nil if (links += 1) > MAX_LINKS
+      cur = canonical(File.readlink(cur), File.dirname(cur), links)
+      return nil unless cur
+    end
+    cur
+  rescue ArgumentError, SystemCallError
+    nil
+  end
+
+  # nil when the candidate stays inside the root, else the reason.
+  def path_problem(path, cwd, root)
+    return nil if path.empty? || path == "/dev/null" || path == "-"
+    if path.match?(GLOB)
+      return "#{path} uses a recursive glob (**), which can follow links out of the workspace" if path.include?("**")
+      parts = path.split("/", -1)
+      first = parts.index { |p| p.match?(GLOB) }
+      # A shell matches ".." only with a pattern that itself starts with a dot.
+      if parts[first..].any? { |p| p.match?(GLOB) && p.start_with?(".") && File.fnmatch?(p, "..", File::FNM_DOTMATCH) }
+        return "#{path} can expand to .. and leave the workspace"
+      end
+      prefix = parts[0...first].join("/")
+      prefix = "/" if prefix.empty? && path.start_with?("/")
+      reason = path_problem(prefix, cwd, root) unless prefix.empty?
+      return reason if reason
+      base = canonical(cwd, "/")
+      Dir.glob(path.start_with?("/") ? path : File.join(base.to_s, path)).first(1000).each do |match|
+        resolved = canonical(match, cwd)
+        return "#{path} matches #{match}, which is outside the workspace" unless resolved && inside?(resolved, root)
+      end
+      return nil
+    end
+    resolved = canonical(path, cwd)
+    return "#{path} cannot be resolved" unless resolved
+    inside?(resolved, root) ? nil : "#{path} is outside the workspace"
+  end
+
+  # Everything in a word that could be a path: the word, the value attached
+  # to an option, and each `=` or `:` separated piece. `known` holds the
+  # command's short options that take a value.
+  def path_candidates(word, known)
+    found = [word]
+    if word.start_with?("--")
+      found = [word[2..]]
+    elsif word.start_with?("-") && word.length > 1
+      letters = word[1..]
+      k = letters.index(/[^A-Za-z0-9]/) || letters.length
+      at = letters[0...k].index(/[#{Regexp.escape(known)}]/) unless known.empty?
+      # Known option at position `at`: its value is what follows. The longer
+      # suffixes are kept in case an earlier letter is the one taking a value.
+      # No known option: any suffix may be a value.
+      found = (1..(at ? at + 1 : letters.length - 1)).map { |j| letters[j..] }
+    end
+    # After `--` a word starting with a dash is a file name; check it as one.
+    found << "./#{word}" if word.start_with?("-") && word.length > 1
+    (found + found.flat_map { |f| f.split(/[=:]/) }).uniq.reject(&:empty?)
+  end
+
+  def outside_root(words, root, cwd)
+    root = canonical(root, "/") or return "the workspace root cannot be resolved"
+    cmd = words.first
+    home = canonical(cwd, "/")
+    return "the working directory is outside the workspace" unless home && inside?(home, root)
+    return nil if TEXT_ONLY.include?(cmd)
+    args = words.drop(1)
+    if cmd == "jq" && args.any? { |a| a.match?(/\b(import|include)\b/) }
+      return "jq import/include reads a module from a path inside the program, outside the workspace check"
+    end
+    known = PATH_OPTION[cmd].to_s
+    if cmd == "git"
+      # `git -C dir` moves the directory that later relative paths start from.
+      while args.first.to_s.start_with?("-")
+        if args.first == "-C" && args[1]
+          reason = path_problem(args[1], cwd, root)
+          return reason if reason
+          cwd = canonical(args[1], cwd) || cwd
+          args = args.drop(2)
+        else
+          args.shift.then { |w| path_candidates(w, "").each { |c| (reason = path_problem(c, cwd, root)) && (return reason) } }
+        end
+      end
+      known = PATH_OPTION["grep"] if args.first == "grep"
+    end
+    args.each do |w|
+      next if w == "--"
+      return "#{w} starts with =, which zsh expands to a command's path outside the workspace" if w.start_with?("=")
+      path_candidates(w, known).each do |c|
+        reason = path_problem(c, cwd, root)
+        return reason if reason
+      end
+    end
+    nil
+  end
+
+  def check_words(words, cwd = Dir.pwd)
+    if (root = ENV["READONLY_GUARD_ROOT"]) && !root.empty? && (reason = outside_root(words, root, cwd))
+      return reason
+    end
+    first = words.first
+    return "environment assignments are not allowed" if first.include?("=") && first =~ /\A[A-Za-z_][A-Za-z0-9_]*=/
+    return "path-qualified commands are not allowed; use the bare command name" if first.include?("/")
+    args = words.drop(1)
+    if (forbidden = FORBIDDEN_LONG[first]) && (hit = args.find { |a| forbidden.any? { |f| long_abbrev?(a, f) } })
+      return "#{first} #{hit.split('=').first} (or an abbreviation of it) writes files or runs programs"
+    end
+    case first
+    when "git" then check_git(args)
+    when "find" then check_find(args)
+    when "sed" then check_sed(args)
+    when "sort"
+      if args.any? { |a| short_cluster?(a, "o") || a.start_with?("--output") } then "sort output files are not allowed"
+      elsif args.any? { |a| a.start_with?("--compress-program") } then "sort --compress-program runs a program"
+      end
+    when "uniq" then args.reject { |a| a.start_with?("-") }.size > 1 ? "uniq with an output file is not allowed" : nil
+    when "rg" then args.any? { |a| a.start_with?("--pre", "--hostname-bin") } ? "rg --pre/--hostname-bin run commands" : nil
+    when "tree" then args.any? { |a| short_cluster?(a, "o") || a.start_with?("--output") } ? "tree -o writes a file" : nil
+    when "date" then args.any? { |a| short_cluster?(a, "s") || a.start_with?("--set") } ? "date --set changes the clock" : nil
+    when "file" then args.any? { |a| short_cluster?(a, "C") || a.start_with?("--compile") } ? "file -C writes a magic file" : nil
+    when "codegraph" then %w[explore search query].include?(args.first) ? nil : "only codegraph explore/search/query are allowed"
+    when *SIMPLE then nil
+    else "#{first} is not on the read-only allowlist"
+    end
+  end
+
+  # True when arg is the long option or an abbreviation of it (3+ characters,
+  # with or without =value): --out, --output, --out=file.
+  def long_abbrev?(arg, full)
+    name = arg.split("=", 2).first
+    name.start_with?("--") && name.length >= 3 && full.start_with?(name)
+  end
+
+  # True for a short-option cluster containing the flag, e.g. -o, -uo, -ofile.
+  def short_cluster?(arg, flag)
+    arg.start_with?("-") && !arg.start_with?("--") && arg[1..].to_s.include?(flag)
+  end
+
+  def check_git(args)
+    while (a = args.first) && a.start_with?("-")
+      case a
+      when "-C" then args = args.drop(2)
+      when "--no-pager" then args = args.drop(1)
+      else return "git option #{a} is not allowed before the subcommand"
+      end
+    end
+    sub, *rest = args
+    return "git subcommand is required" if sub.nil?
+    return "--output writes a file" if rest.any? { |r| r.start_with?("--output") }
+    return "--ext-diff runs an external program" if rest.include?("--ext-diff")
+    return "git grep -O runs a program" if sub == "grep" && rest.any? { |r| short_cluster?(r, "O") || r.start_with?("--open-files-in-pager") }
+    return nil if GIT_READ.include?(sub)
+    case sub
+    when "branch" then (rest - %w[-a -r -v -vv --list --all --remotes --show-current --no-color]).empty? ? nil : "git branch is allowed only for listing"
+    when "remote" then (rest - %w[-v]).empty? ? nil : "git remote is allowed only for listing"
+    when "stash", "worktree" then rest == ["list"] ? nil : "git #{sub} is allowed only as '#{sub} list'"
+    when "config" then rest.first.to_s.match?(/\A(--get|--get-all|--list|-l)\z/) ? nil : "git config is allowed only with --get or --list"
+    else "git #{sub} is not on the read-only allowlist"
+    end
+  end
+
+  FIND_FORBIDDEN = %w[-exec -execdir -ok -okdir -delete -fprint -fprint0 -fprintf -fls].freeze
+
+  def check_find(args)
+    bad = args & FIND_FORBIDDEN
+    bad.empty? ? nil : "find #{bad.first} can run commands or write files"
+  end
+
+  # Only `sed -n '<lines>p' [files]`: printing line ranges.
+  def check_sed(args)
+    return "sed is allowed only as sed -n '<N>,<M>p' <file>" unless args.first == "-n"
+    script = args[1].to_s
+    return "sed is allowed only as sed -n '<N>,<M>p' <file>" unless script.match?(/\A\d+(,(\d+|\$))?p\z/)
+    # a later option could edit in place (-i) or add a script that writes
+    args.drop(2).any? { |a| a.start_with?("-") && a != "--" } ? "sed takes no options after the print script" : nil
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  if ARGV.first == "--check"
+    decision, reason = ReadonlyBashGuard.decide(ARGV[1], cwd: ARGV[2] == "--cwd" && ARGV[3] ? ARGV[3] : Dir.pwd)
+    puts decision == :allow ? "allow" : "deny: #{reason}"
+    exit(decision == :allow ? 0 : 1)
+  end
+  input = begin
+    JSON.parse($stdin.read)
+  rescue JSON::ParserError
+    nil
+  end
+  if input.is_a?(Hash)
+    exit 0 unless input["tool_name"] == "Bash"
+    # Relative paths in the command resolve against the session's working
+    # directory, which Claude Code passes with the hook input.
+    cwd = input["cwd"].is_a?(String) && input["cwd"].start_with?("/") ? input["cwd"] : Dir.pwd
+    decision, reason = ReadonlyBashGuard.decide(input.dig("tool_input", "command"), cwd: cwd)
+  else
+    input = {}
+    decision, reason = [:deny, "hook input could not be parsed"]
+  end
+  exit 0 if decision == :allow
+  puts JSON.generate({ "hookSpecificOutput" => {
+    "hookEventName" => "PreToolUse",
+    "permissionDecision" => "deny",
+    "permissionDecisionReason" => "Read-only role (#{input['agent_type'] || 'workflow'}): #{reason}. " \
+                                  "Use one read-only inspection command (search, list, read, git status/log/diff/show); " \
+                                  "report what you could not inspect instead of working around this."
+  } })
+  exit 0
+end

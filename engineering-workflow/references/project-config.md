@@ -15,6 +15,7 @@ Preserve existing configs. Supported fields and sections remain compatible:
 | `knowledge_mode` | Existing minimal/decisions/learning setting passed to project-knowledge; if absent, let that skill resolve its defaults when invoked |
 | `knowledge_store` | `docs/knowledge`, used only for knowledge reconciliation |
 | `decisions_store` | Existing ADR convention; no new directory required here |
+| `cross_family_review` | `manual` (recommend it and let the user start it); `auto` allows read-only headless dispatch to the other provider when [routing.md](routing.md) applies the modifier; `off`. Project prose restricting cross-provider agents means `manual` or `off` |
 
 Existing prose sections: Repo topology, Commands, Browser / visual verification,
 Deployment / staging rules, Human gates, Acceptance-criteria conventions,
@@ -23,7 +24,8 @@ An empty Human gates section adds no approval ceremony; existing repository gate
 and authorization still apply. Respect explicit additions and removals within
 those bounds. Do not assume completion approval authorizes merge or deployment.
 
-Optional overrides can also specify a routing preference, attempt/time budget,
+Optional overrides can also specify a routing preference (an explicit model
+here is a project choice the resolver honors without substitution), attempt/time budget,
 required specialist review, audit tracking, or a milestone knowledge gate in
 plain language. Avoid introducing a large configuration schema before needed.
 If legacy project instructions explicitly require nine-state tracking or stronger

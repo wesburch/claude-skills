@@ -1,0 +1,828 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# model-routing: resolve a delegate model for a capability class, and check the
+# model registry for staleness and drift.
+#
+#   model-routing resolve (--class C | --role R) [--host H] [options]
+#   model-routing check [--strict] [--json]
+#
+# Reads local data only: registry/models.yaml, installed CLI versions, the
+# Codex account catalog and user config files. It never calls a model, never
+# touches the network and never writes files. `check` warns; it exits non-zero
+# only with --strict.
+
+Encoding.default_external = Encoding::UTF_8
+Encoding.default_internal = Encoding::UTF_8
+
+require "date"
+require "json"
+require "open3"
+require "optparse"
+require "timeout"
+require "yaml"
+require_relative "lib/routing_support"
+
+SKILL_ROOT = File.expand_path("..", File.dirname(File.realpath(__FILE__)))
+REPO_ROOT = File.expand_path("..", SKILL_ROOT)
+HOSTS = %w[claude-code codex].freeze
+TAGS = %w[FIRST_PARTY BENCHMARK PRACTITIONER PERSONAL LOCAL_EVAL].freeze
+CONFIDENCE = %w[verified plausible anecdotal unknown].freeze
+STATUSES = %w[promoted candidate legacy retired].freeze
+NEVER_AUTOMATIC_EFFORTS = %w[max ultra].freeze
+
+class UsageError < StandardError; end
+
+# ---------------------------------------------------------------- helpers
+
+def version_tuple(str)
+  str.to_s.scan(/\d+/).first(3).map(&:to_i).tap { |a| a.fill(0, a.size...3) }
+end
+
+def version_gte?(installed, required)
+  return false if installed.nil?
+  (version_tuple(installed) <=> version_tuple(required)) >= 0
+end
+
+def run_cmd(argv, seconds: 8)
+  out = +""
+  status = nil
+  Open3.popen2e(*argv) do |stdin, io, thread|
+    stdin.close
+    begin
+      Timeout.timeout(seconds) do
+        out = io.read.to_s
+        status = thread.value
+      end
+    rescue Timeout::Error
+      Process.kill("TERM", thread.pid) rescue nil
+      return nil
+    end
+  end
+  status&.success? ? out : nil
+rescue Errno::ENOENT, Errno::EACCES
+  nil
+end
+
+def cli_version(cmd)
+  return nil if cmd.nil? || cmd.empty?
+  out = run_cmd([cmd, "--version"])
+  out && out[/\d+\.\d+\.\d+/]
+end
+
+def read_json(path)
+  File.exist?(path) ? JSON.parse(File.read(path)) : nil
+rescue JSON::ParserError
+  :invalid
+end
+
+def read_toml(path) = RoutingSupport.read_toml(path)
+
+def read_frontmatter(path)
+  text = File.read(path)
+  m = text.match(/\A---\s*\n(.*?)\n---\s*\n/m)
+  m ? (YAML.safe_load(m[1]) || {}) : {}
+end
+
+# ---------------------------------------------------------------- registry
+
+class Registry
+  attr_reader :data, :path
+
+  def initialize(path)
+    @path = path
+    @data = YAML.safe_load(File.read(path), permitted_classes: [Date], aliases: false)
+  end
+
+  def models = data.fetch("models", [])
+  def model(id) = models.find { |m| m["id"] == id }
+  def classes = data.fetch("classes", {})
+  def roles = data.fetch("roles", {})
+  def hosts = data.fetch("hosts", {})
+  def effort_tiers = data.fetch("effort_tiers", {})
+  def max_age_days = data.dig("refresh", "max_age_days") || 30
+
+  def alias_target(name, version)
+    entries = hosts.dig("claude-code", "aliases", name) || []
+    entries.select { |e| version_gte?(version, e["min_cli"].to_s) }.last&.fetch("model")
+  end
+
+  def alias_names = (hosts.dig("claude-code", "aliases") || {}).keys
+
+  def effort_level(model_id, tier)
+    m = model(model_id) || {}
+    (m["effort_map"] || {})[tier] || effort_tiers[tier]
+  end
+
+  def supported_efforts(model_id)
+    ((model(model_id) || {}).dig("effort", "levels") || []).map(&:to_s)
+  end
+end
+
+# ---------------------------------------------------------------- environment
+
+class Environment
+  attr_reader :home, :today, :registry
+
+  def initialize(registry, home:, today:)
+    @registry = registry
+    @home = home
+    @today = today
+  end
+
+  def detect_host
+    registry.hosts.each do |name, cfg|
+      return name if Array(cfg["detect_env"]).any? { |v| ENV[v] && !ENV[v].empty? }
+    end
+    nil
+  end
+
+  # Claude Code runtimes: the CLI on PATH and, inside the desktop app, the
+  # bundled binary that actually runs this session.
+  def claude_versions
+    @claude_versions ||= begin
+      v = {}
+      path_version = cli_version("claude")
+      v["claude (PATH)"] = path_version if path_version
+      exec = ENV["CLAUDE_CODE_EXECPATH"]
+      exec_version = exec && File.executable?(exec) ? cli_version(exec) : nil
+      v["this session (CLAUDE_CODE_EXECPATH)"] = exec_version if exec_version
+      v
+    end
+  end
+
+  def session_claude_version
+    claude_versions["this session (CLAUDE_CODE_EXECPATH)"] || claude_versions["claude (PATH)"]
+  end
+
+  def codex_version = (@codex_version ||= cli_version("codex") || false) || nil
+
+  def codex_cache
+    @codex_cache ||= read_json(File.join(home, ".codex", "models_cache.json"))
+  end
+
+  def codex_accessible
+    cache = codex_cache
+    return nil unless cache.is_a?(Hash)
+    Array(cache["models"]).select { |m| m["visibility"] == "list" }.map { |m| m["slug"] }
+  end
+
+  def codex_bundled
+    @codex_bundled ||= begin
+      out = run_cmd(["codex", "debug", "models", "--bundled"])
+      parsed = out && JSON.parse(out) rescue nil
+      list = parsed.is_a?(Hash) ? parsed["models"] : parsed
+      list.is_a?(Array) ? list.map { |m| m["slug"] || m["id"] }.compact : nil
+    end
+  end
+
+  def claude_settings = (@claude_settings ||= read_json(File.join(home, ".claude", "settings.json")))
+  def codex_config = (@codex_config ||= read_toml(File.join(home, ".codex", "config.toml")))
+
+  # Model IDs a delegate can use on the host, with Listed/Accessible evidence.
+  def availability(host, listed_override: nil)
+    case host
+    when "claude-code"
+      v = session_claude_version
+      aliases = listed_override || registry.alias_names.select { |a| registry.alias_target(a, v) }
+      alias_ids = aliases.to_h { |a| [a, registry.alias_target(a, v)] }.compact
+      pinnable = registry.models.select do |m|
+        Array(m["hosts"]).include?("claude-code") && m["status"] != "retired" &&
+          (m.dig("min_cli", "claude-code").nil? || version_gte?(v, m.dig("min_cli", "claude-code").to_s))
+      end.map { |m| m["id"] }
+      allowed = claude_settings.is_a?(Hash) ? claude_settings["availableModels"] : nil
+      pinnable &= pinnable.select { |id| allowed.any? { |a| id.start_with?(a) || alias_ids[a] == id } } if allowed.is_a?(Array)
+      { ids: pinnable, alias_ids: alias_ids, accessible: :unknown, runtime_version: v,
+        note: "Claude Code exposes aliases per invocation; full IDs only through agent frontmatter" }
+    when "codex"
+      accessible = listed_override || codex_accessible
+      bundled = codex_bundled
+      ids = accessible || bundled || []
+      { ids: ids, alias_ids: {}, accessible: accessible ? :catalog : :unknown, runtime_version: codex_version,
+        bundled: bundled, note: accessible ? "account catalog (~/.codex/models_cache.json)" : "bundled catalog only; account access unknown" }
+    else
+      raise UsageError, "unknown host #{host.inspect}"
+    end
+  end
+end
+
+# ---------------------------------------------------------------- resolve
+
+class Resolver
+  def initialize(env)
+    @env = env
+    @reg = env.registry
+  end
+
+  def resolve(opts)
+    role_name = opts[:role]
+    role = role_name && @reg.roles[role_name]
+    raise UsageError, "unknown role #{role_name}" if role_name && role.nil?
+    klass = opts[:class] || role&.fetch("class")
+    raise UsageError, "give --class or --role" unless klass
+    raise UsageError, "unknown class #{klass}" unless @reg.classes.key?(klass)
+
+    host = opts[:host] || @env.detect_host
+    raise UsageError, "host not detected; pass --host claude-code|codex" unless host
+    if opts[:cross_family]
+      host = (HOSTS - [host]).first
+    end
+
+    result = { "host" => host, "class" => klass, "role" => role_name, "notes" => [], "fallbacks" => [] }
+    if klass == "primary-interactive"
+      pref = @reg.classes.dig(klass, "current_preference", host)
+      return result.merge("status" => "primary_interactive", "model" => pref&.fetch("model", nil),
+                          "effort" => pref&.fetch("effort", nil),
+                          "notes" => ["Policy user_choice: use the current session. Never auto-select or downgrade the primary model."])
+    end
+
+    avail = @env.availability(host, listed_override: opts[:listed])
+    result["runtime_version"] = avail[:runtime_version]
+    result["evidence"] = { "listed" => avail[:ids].sort, "accessible" => avail[:accessible].to_s,
+                           "observed" => "unknown until the dispatch reports it" }
+    result["notes"] << avail[:note]
+
+    explicit = opts[:user_model] || opts[:project_model]
+    if explicit
+      source = opts[:user_model] ? "user" : "project"
+      id = avail[:alias_ids][explicit] || explicit
+      unless avail[:ids].include?(id)
+        return result.merge("status" => "explicit_choice_unavailable", "requested_model" => explicit,
+                            "notes" => result["notes"] + ["#{source} chose #{explicit}; " \
+                                                          "#{@reg.model(id) ? "not listed or accessible on #{host}" : 'not in the registry, so unverified on this host'}. " \
+                                                          "No substitution: report the limitation and ask."],
+                            "suggestion" => first_available(klass, host, avail)&.fetch("model"))
+      end
+      choice = { "model" => id, "tier" => @reg.classes.dig(klass, host, "order", 0, "tier") || "standard" }
+      result["notes"] << "#{source} choice honored"
+    else
+      choice, fallbacks = pick(klass, host, avail)
+      result["fallbacks"].concat(fallbacks)
+      if choice.nil? && opts[:allow_upward] && (up = @reg.classes.dig(klass, "upward_fallback"))
+        choice, more = pick(up, host, avail)
+        result["fallbacks"].concat(more)
+        result["fallbacks"] << "no #{klass} model available on #{host}; moved up to #{up} (explicitly permitted)" if choice
+      end
+      if choice.nil?
+        return result.merge("status" => "no_candidate",
+                            "notes" => result["notes"] + ["No promoted #{klass} model is available on #{host}. " \
+                                                          "Keep the work local or report the unmet capability; " \
+                                                          "missing access never triggers an automatic upgrade."])
+      end
+    end
+
+    tier = opts[:tier] || choice["tier"] || "standard"
+    effort, effort_note = pick_effort(choice["model"], tier, opts)
+    result["notes"] << effort_note if effort_note
+    result.merge!("status" => "ok", "model" => choice["model"], "tier" => tier, "effort" => effort)
+    result["model_status"] = @reg.model(choice["model"])&.fetch("status", nil)
+    result["dispatch"] = dispatch_for(host, klass, role_name, choice["model"], effort, avail, opts)
+    result["candidates_awaiting_evidence"] = Array(@reg.classes.dig(klass, host, "candidates")).map { |c| c["model"] }
+    result
+  end
+
+  private
+
+  def first_available(klass, host, avail)
+    Array(@reg.classes.dig(klass, host, "order")).find { |e| avail[:ids].include?(e["model"]) }
+  end
+
+  def pick(klass, host, avail)
+    fallbacks = []
+    Array(@reg.classes.dig(klass, host, "order")).each do |entry|
+      m = @reg.model(entry["model"])
+      if m.nil? || m["status"] != "promoted"
+        fallbacks << "#{entry['model']} skipped: status #{m ? m['status'] : 'missing'} (only promoted models are auto-selected)"
+      elsif avail[:ids].include?(entry["model"])
+        return [entry, fallbacks]
+      else
+        fallbacks << "#{entry['model']} unavailable on #{host}; trying the next #{klass} candidate"
+      end
+    end
+    [nil, fallbacks]
+  end
+
+  def pick_effort(model_id, tier, opts)
+    if opts[:user_effort]
+      level = opts[:user_effort]
+      return [level, "explicit user effort #{level} honored"]
+    end
+    raise UsageError, "tier #{tier} is never automatic; use --user-effort for an explicit request" if NEVER_AUTOMATIC_EFFORTS.include?(tier)
+    if tier == "extended" && opts[:escalation].to_s.strip.empty?
+      raise UsageError, "extended (xhigh) requires --escalation \"<trigger and evidence>\" (routing.md: Effort)"
+    end
+    raise UsageError, "unknown effort tier #{tier}" unless @reg.effort_tiers.key?(tier)
+    level = @reg.effort_level(model_id, tier)
+    supported = @reg.supported_efforts(model_id)
+    if supported.empty?
+      return [nil, "#{model_id} has no effort control; the effort tier is not enforceable"]
+    end
+    unless supported.include?(level)
+      fallback = %w[high medium low].find { |l| supported.include?(l) }
+      return [fallback, "#{model_id} does not support #{level}; using #{fallback}"]
+    end
+    note = tier == "extended" ? "escalation record: #{opts[:escalation]}" : nil
+    [level, note]
+  end
+
+  # Keeps the assignment's role (and so its tool access). A role moves to another
+  # role only through its registry `escalates_to` entry for the target class.
+  def dispatch_for(host, klass, role_name, model_id, effort, avail, opts)
+    return cross_family_command(host, role_name, model_id, effort) if opts[:cross_family]
+
+    requested = role_name && @reg.roles[role_name]
+    unless requested
+      return { "mechanism" => "choose a role", "roles_for_class" => @reg.roles.select { |_, r| r["class"] == klass }.keys,
+               "note" => "pass --role so the dispatch keeps the assignment's tool access" }
+    end
+    name = role_name
+    if requested["class"] != klass
+      target = requested["escalates_to"]
+      name = target if target && @reg.roles.dig(target, "class") == klass
+    end
+    role = @reg.roles[name]
+    pinned = role[host] || {}
+    notes = []
+    notes << "#{role_name} escalates to #{name} for #{klass}" if name != role_name
+    matches = pinned["model"] == model_id && pinned["effort"] == effort
+    d = { "role" => name, "access" => role["access"] }
+
+    case host
+    when "claude-code"
+      d.merge!("mechanism" => "Agent tool", "subagent_type" => name)
+      if matches
+        notes << "the #{name} definition sets this model and effort; pass no per-invocation model"
+      else
+        alias_name = avail[:alias_ids].key(model_id)
+        d["model_param"] = alias_name
+        d["effort_actual"] = pinned["effort"]
+        notes << if alias_name.nil?
+                   "#{model_id} is not selectable per invocation (aliases only); keep the work in the host session or use a listed alias"
+                 else
+                   "per-invocation model #{alias_name} (resolves to #{model_id}); effort stays #{pinned['effort']} from the " \
+                   "definition, not the requested #{effort}. When the requested effort matters, keep the work in the host session"
+                 end
+      end
+    when "codex"
+      d.merge!(codex_delegate_dispatch(name, role, pinned, model_id, effort))
+      notes << "headless delegate: model, effort, standard tier, #{d['sandbox']} sandbox, approvals never and " \
+               "multi-agent off are set explicitly; nothing inherits from the parent session or config.toml. " \
+               "In-process Codex children are not tier- or sandbox-isolated, so they are not used for workflow roles"
+    end
+    d["note"] = notes.join("; ")
+    d
+  end
+
+  def codex_delegate_dispatch(name, role, pinned, model_id, effort)
+    command = [File.join(SKILL_ROOT, "scripts", "codex-delegate"), "--role", name, "--cwd", "<repo>"]
+    command += ["--model", model_id] if pinned["model"] != model_id
+    command += ["--effort", effort.to_s] if pinned["effort"] != effort
+    command += ["--packet", "<packet.md>"]
+    { "mechanism" => "headless codex exec (scripts/codex-delegate)", "command" => command,
+      "service_tier" => @reg.hosts.dig("codex", "delegate_service_tier"),
+      "sandbox" => role["access"] == "read-only" ? "read-only" : "workspace-write" }
+  end
+
+  def cross_family_command(host, role_name, model_id, effort)
+    role_name = "wf-reviewer" unless role_name && @reg.roles[role_name]
+    role = @reg.roles[role_name]
+    note = "cross-family; respect the project's cross_family_review setting"
+    case host
+    when "codex"
+      codex_delegate_dispatch(role_name, role, role["codex"] || {}, model_id, effort).merge("role" => role_name, "note" => note)
+    when "claude-code"
+      alias_name = @env.registry.models.find { |m| m["id"] == model_id }&.fetch("aliases", [])&.first
+      { "mechanism" => "headless CLI", "role" => role_name,
+        "command" => ["claude", "-p", "--agent", role_name, "--model", model_id, "--effort", effort.to_s],
+        "alias" => alias_name,
+        "note" => note + "; runs the installed role as the main agent. Its guard hook under --agent is not yet smoke-tested" }
+    end
+  end
+end
+
+# ---------------------------------------------------------------- check
+
+class Checker
+  Finding = Struct.new(:level, :area, :message)
+
+  def initialize(env)
+    @env = env
+    @reg = env.registry
+    @findings = []
+  end
+
+  def run
+    check_schema
+    check_staleness
+    check_claude
+    check_codex
+    check_claude_settings
+    check_codex_config
+    check_agent_files
+    check_promotion_readiness
+    @findings
+  end
+
+  private
+
+  def error(area, msg) = @findings << Finding.new("ERROR", area, msg)
+  def warn(area, msg) = @findings << Finding.new("WARN", area, msg)
+  def info(area, msg) = @findings << Finding.new("INFO", area, msg)
+  def ok(area, msg) = @findings << Finding.new("OK", area, msg)
+
+  def age_days(date)
+    d = date.is_a?(Date) ? date : Date.parse(date.to_s)
+    (@env.today - d).to_i
+  rescue ArgumentError
+    nil
+  end
+
+  def check_schema
+    ids = @reg.models.map { |m| m["id"] }
+    dup = ids.tally.select { |_, n| n > 1 }.keys
+    warn("registry", "duplicate model ids: #{dup.join(', ')}") unless dup.empty?
+    dims = Array(@reg.data["behavior_dimensions"])
+    @reg.models.each do |m|
+      %w[id provider status last_verified].each do |k|
+        warn("registry", "#{m['id'] || '?'}: missing #{k}") if m[k].nil?
+      end
+      warn("registry", "#{m['id']}: unknown status #{m['status']}") if m["status"] && !STATUSES.include?(m["status"])
+      claims = Array(m["evidence"]) + (m["behavior"] || {}).values.flatten
+      (m["behavior"] || {}).each_key do |dim|
+        warn("registry", "#{m['id']}: behavior dimension #{dim} is not in behavior_dimensions") unless dims.include?(dim)
+      end
+      claims.each do |c|
+        warn("registry", "#{m['id']}: evidence tag #{c['tag'].inspect} invalid") unless TAGS.include?(c["tag"])
+        warn("registry", "#{m['id']}: confidence #{c['confidence'].inspect} invalid") unless CONFIDENCE.include?(c["confidence"])
+      end
+      Array(m["local_eval"]).each do |e|
+        %w[category class host effort date sample_size pass_rate].each do |k|
+          warn("registry", "#{m['id']}: local_eval entry missing #{k}") if e[k].nil?
+        end
+      end
+    end
+    @reg.classes.each do |klass, cfg|
+      HOSTS.each do |host|
+        next unless cfg[host].is_a?(Hash)
+        Array(cfg[host]["order"]).each do |e|
+          m = @reg.model(e["model"])
+          if m.nil? then warn("registry", "#{klass}/#{host}: order names unknown model #{e['model']}")
+          elsif m["status"] != "promoted" then warn("registry", "#{klass}/#{host}: #{e['model']} is in `order` but status is #{m['status']}")
+          end
+        end
+        Array(cfg[host]["candidates"]).each do |e|
+          warn("registry", "#{klass}/#{host}: candidate #{e['model']} is not in models") unless @reg.model(e["model"])
+        end
+      end
+    end
+    @reg.roles.each do |name, role|
+      warn("registry", "role #{name}: unknown class #{role['class']}") unless @reg.classes.key?(role["class"])
+      HOSTS.each do |host|
+        id = role.dig(host, "model")
+        m = id && @reg.model(id)
+        if m.nil? then warn("registry", "role #{name}/#{host}: unknown model #{id}")
+        elsif m["status"] != "promoted" then warn("registry", "role #{name}/#{host}: pins #{id} with status #{m['status']}")
+        end
+        eff = role.dig(host, "effort")
+        warn("registry", "role #{name}/#{host}: effort #{eff} is never automatic") if NEVER_AUTOMATIC_EFFORTS.include?(eff) || eff == "xhigh"
+      end
+    end
+  end
+
+  def check_staleness
+    max = @reg.max_age_days
+    if (a = age_days(@reg.data["last_reviewed"])) && a > max
+      warn("staleness", "registry last_reviewed #{@reg.data['last_reviewed']} is #{a} days old (max #{max}); re-verify vendor pages and run this check")
+    end
+    stale = @reg.models.select { |m| m["status"] != "retired" && (a = age_days(m["last_verified"])) && a > max }
+    unless stale.empty?
+      warn("staleness", "#{stale.size} model entries not verified in #{max} days: #{stale.map { |m| m['id'] }.join(', ')}")
+    end
+    ok("staleness", "registry reviewed #{@reg.data['last_reviewed']} (max age #{max} days)") if stale.empty?
+  end
+
+  def check_claude
+    versions = @env.claude_versions
+    if versions.empty?
+      info("claude-code", "no Claude Code CLI found; alias checks skipped")
+      return
+    end
+    versions.each do |label, v|
+      resolved = @reg.alias_names.to_h { |a| [a, @reg.alias_target(a, v)] }.compact
+      ok("claude-code", "#{label} #{v}: " + resolved.map { |a, id| "#{a}->#{id}" }.join(", "))
+      resolved.each do |a, id|
+        m = @reg.model(id)
+        if m.nil? then warn("claude-code", "alias #{a} resolves to #{id}, which is not in the registry")
+        elsif m["status"] == "candidate" && @reg.models.any? { |x| x["status"] == "promoted" && Array(x["aliases"]).include?(a) }
+          info("claude-code", "#{label}: alias #{a} now resolves to candidate #{id}; wf-* roles pin promoted IDs, so delegates are unaffected")
+        end
+      end
+      @reg.models.each do |m|
+        req = m.dig("min_cli", "claude-code")
+        next unless req && m["status"] == "promoted" && !version_gte?(v, req.to_s)
+        warn("claude-code", "#{label} #{v} is older than #{req}, required for promoted #{m['id']}")
+      end
+    end
+    if versions.values.uniq.size > 1
+      info("claude-code", "runtimes differ (#{versions.map { |k, v| "#{k} #{v}" }.join('; ')}); aliases can resolve differently between terminal and desktop")
+    end
+  end
+
+  def check_codex
+    v = @env.codex_version
+    cache = @env.codex_cache
+    unless v || cache
+      info("codex", "no Codex CLI or catalog found; Codex checks skipped")
+      return
+    end
+    ignored = Array(@reg.hosts.dig("codex", "ignored_catalog_ids"))
+    known = @reg.models.map { |m| m["id"] }
+    accessible = @env.codex_accessible
+    if cache == :invalid
+      warn("codex", "~/.codex/models_cache.json is not valid JSON")
+    elsif cache.is_a?(Hash)
+      ok("codex", "account catalog fetched #{cache['fetched_at']} by client #{cache['client_version']}: #{accessible.join(', ')}")
+      (accessible - known - ignored).each do |id|
+        warn("codex", "account catalog lists #{id}, which is not in the registry; add it as a candidate (not a default)")
+      end
+      @reg.models.select { |m| Array(m["hosts"]).include?("codex") }.each do |m|
+        next if accessible.include?(m["id"]) || %w[retired].include?(m["status"])
+        if m["status"] == "promoted"
+          warn("codex", "promoted #{m['id']} is not in the account catalog; the resolver will fall back within its class")
+        elsif m["status"] == "candidate"
+          info("codex", "candidate #{m['id']} is not accessible to this account yet")
+        end
+      end
+      if v && cache["client_version"] && cache["client_version"] != v
+        info("codex", "catalog was refreshed by client #{cache['client_version']} but the codex CLI is #{v} (desktop app vs CLI)")
+      end
+    end
+    if v
+      bundled = @env.codex_bundled
+      (Array(bundled) - known - ignored).each do |id|
+        warn("codex", "codex #{v} bundled catalog lists #{id}, which is not in the registry")
+      end
+      @reg.models.each do |m|
+        req = m.dig("min_cli", "codex")
+        next unless req && !version_gte?(v, req.to_s) && %w[promoted candidate].include?(m["status"])
+        level = m["status"] == "promoted" ? :warn : :info
+        send(level, "codex", "codex #{v} is older than #{req}, required for #{m['status']} #{m['id']} (run `codex update` when ready)")
+      end
+    end
+  end
+
+  def check_claude_settings
+    s = @env.claude_settings
+    return if s.nil?
+    return warn("config", "~/.claude/settings.json is not valid JSON") if s == :invalid
+    known = @reg.models.map { |m| m["id"] }
+    model = s["model"]
+    if model && !@reg.alias_names.include?(model.sub(/\[1m\]\z/, "")) && !%w[default best opusplan].include?(model) &&
+       !known.include?(model.sub(/\[1m\]\z/, ""))
+      warn("config", "~/.claude/settings.json model #{model} is not a known alias or registry model")
+    end
+    ms = s["modelSettings"] || {}
+    ms.each_key do |id|
+      warn("config", "~/.claude/settings.json modelSettings.#{id} names a model not in the registry") unless known.include?(id)
+    end
+    gaps = Hash.new { |h, k| h[k] = [] }
+    @env.claude_versions.each do |label, v|
+      @reg.alias_names.each do |a|
+        target = @reg.alias_target(a, v)
+        next if target.nil? || ms.key?(target)
+        older = ms.keys.select { |k| (@reg.model(k) || {}).fetch("aliases", []).include?(a) && k != target }
+        gaps[[older, target, a]] << "#{label} #{v}" unless older.empty?
+      end
+    end
+    gaps.each do |(older, target, a), runtimes|
+      warn("config", "modelSettings has #{older.join(', ')} but not #{target}, which `#{a}` resolves to on #{runtimes.join(' and ')}; " \
+                     "its saved effort does not carry over")
+    end
+    env = s["env"] || {}
+    if env["CLAUDE_CODE_SUBAGENT_MODEL"]
+      level = env["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"].to_s == "1" ? :warn : :info
+      send(level, "config", "CLAUDE_CODE_SUBAGENT_MODEL=#{env['CLAUDE_CODE_SUBAGENT_MODEL']}#{level == :warn ? ' with FORCE overrides wf-* role models' : ' is a default only; wf-* roles still apply'}")
+    end
+  end
+
+  def check_codex_config
+    c = @env.codex_config
+    return if c.nil?
+    known = @reg.models.map { |m| m["id"] }
+    warn("config", "~/.codex/config.toml model #{c['model']} is not in the registry") if c["model"].is_a?(String) && !known.include?(c["model"])
+    agents = c["agents"] || {}
+    if agents["default_subagent_model"].is_a?(String) && !known.include?(agents["default_subagent_model"])
+      warn("config", "[agents] default_subagent_model #{agents['default_subagent_model']} is not in the registry")
+    end
+    tier = c["service_tier"]
+    parent = "#{c['model'] || 'parent model'} @ #{c['model_reasoning_effort'] || 'default effort'}#{tier ? " / service_tier=#{tier}" : ''}"
+    if agents["default_subagent_model"].nil?
+      frontier = Array(@reg.classes.dig("frontier-judgment", "codex", "order")).map { |e| e["model"] } +
+                 [@reg.classes.dig("primary-interactive", "current_preference", "codex", "model")]
+      level = tier.to_s =~ /fast|priority/ || frontier.include?(c["model"]) ? :warn : :info
+      send(level, "delegate-cost", "no [agents] default_subagent_model: in-process subagents without a wf-* role inherit #{parent}")
+    end
+    if tier.to_s =~ /fast|priority/
+      info("delegate-cost", "in-process Codex children inherit the parent's #{tier} tier and live sandbox overrides; " \
+                            "workflow delegates run through scripts/codex-delegate instead")
+    end
+  end
+
+  def check_agent_files
+    claude_dir = File.join(REPO_ROOT, "agents", "claude")
+    codex_dir = File.join(REPO_ROOT, "agents", "codex")
+    role_names = @reg.roles.keys
+    claude_files = Dir.glob(File.join(claude_dir, "*.md"))
+    codex_files = Dir.glob(File.join(codex_dir, "*.toml"))
+    extra = (claude_files + codex_files).map { |f| File.basename(f).sub(/\.(md|toml)\z/, "") } - role_names
+    warn("agents", "agent files without a registry role (no per-task agents): #{extra.uniq.join(', ')}") unless extra.empty?
+    guard = File.join(SKILL_ROOT, "scripts", "readonly-bash-guard")
+
+    @reg.roles.each do |name, role|
+      cpath = File.join(claude_dir, "#{name}.md")
+      if File.exist?(cpath)
+        fm = read_frontmatter(cpath)
+        want = role["claude-code"] || {}
+        compare("agents", "#{name}.md", { "model" => fm["model"], "effort" => fm["effort"] }, want.slice("model", "effort"))
+        disallowed = Array(fm["disallowedTools"].is_a?(String) ? fm["disallowedTools"].split(/,\s*/) : fm["disallowedTools"])
+        error("isolation", "#{name}.md: disallowedTools must include Agent (no nested delegation)") unless disallowed.include?("Agent")
+        if role["access"] == "read-only"
+          error("isolation", "#{name}.md: read-only role must disallow Edit and Write") unless (%w[Edit Write] - disallowed).empty?
+          hooks = Array(fm.dig("hooks", "PreToolUse"))
+          cmd = hooks.select { |h| h["matcher"] == "Bash" }.flat_map { |h| Array(h["hooks"]) }.map { |h| h["command"].to_s }
+          if cmd.none? { |c| c.include?("readonly-bash-guard") && c.include?("|| exit 2") }
+            error("isolation", "#{name}.md: read-only role needs the fail-closed PreToolUse Bash guard")
+          end
+        end
+      else
+        error("agents", "source missing: agents/claude/#{name}.md")
+      end
+      tpath = File.join(codex_dir, "#{name}.toml")
+      if File.exist?(tpath)
+        t = read_toml(tpath)
+        want = role["codex"] || {}
+        compare("agents", "#{name}.toml",
+                { "model" => t["model"], "effort" => t["model_reasoning_effort"], "sandbox_mode" => t["sandbox_mode"], "service_tier" => t["service_tier"] },
+                want.slice("model", "effort", "sandbox_mode", "service_tier"))
+        %w[name description developer_instructions].each do |k|
+          error("agents", "#{name}.toml: missing required #{k}") if t[k].nil?
+        end
+      else
+        error("agents", "source missing: agents/codex/#{name}.toml")
+      end
+      check_installed_claude(name, cpath) if File.exist?(cpath)
+      check_installed_codex(name, tpath) if File.exist?(tpath)
+    end
+    error("isolation", "readonly-bash-guard is missing or not executable") unless File.executable?(guard)
+  end
+
+  # Claude roles install as symlinks to the repo source.
+  def check_installed_claude(name, source)
+    target = File.join(@env.home, ".claude", "agents", "#{name}.md")
+    if !File.symlink?(target) && !File.exist?(target)
+      error("install", "Claude #{name}: not installed (scripts/install.sh)")
+    elsif File.symlink?(target)
+      if !File.exist?(target)
+        error("install", "Claude #{name}: broken symlink")
+      elsif File.realpath(target) != File.realpath(source)
+        error("install", "Claude #{name}: symlink points to #{File.readlink(target)}, not the repo source")
+      else
+        ok("install", "Claude #{name}: installed, in sync (symlink)")
+      end
+    elsif File.read(target) == File.read(source)
+      ok("install", "Claude #{name}: installed, in sync (copy)")
+    else
+      error("install", "Claude #{name}: installed copy differs from the repo source")
+    end
+  end
+
+  # Codex roles install as real copies: Codex does not load symlinked agent files.
+  def check_installed_codex(name, source)
+    target = File.join(@env.home, ".codex", "agents", "#{name}.toml")
+    if File.symlink?(target)
+      error("install", "Codex #{name}: installed as a symlink, which Codex cannot load; rerun scripts/install.sh")
+    elsif !File.exist?(target)
+      error("install", "Codex #{name}: not installed (scripts/install.sh)")
+    elsif File.read(target) != File.read(source)
+      error("install", "Codex #{name}: installed copy differs from the repo source; rerun scripts/install.sh")
+    else
+      ok("install", "Codex #{name}: installed, in sync (copy); runtime load is verified by scripts/runtime-smoke-test")
+    end
+  end
+
+  def compare(area, label, have, want)
+    diffs = want.reject { |k, v| have[k].to_s == v.to_s }
+    if diffs.empty?
+      ok(area, "#{label} matches its registry role")
+    else
+      warn(area, "#{label} drifted from registry role: " + diffs.map { |k, v| "#{k}=#{have[k].inspect} (registry #{v.inspect})" }.join(", "))
+    end
+  end
+
+  def check_promotion_readiness
+    bar = @reg.data.dig("promotion", "local_eval_bar") || {}
+    @reg.classes.each do |klass, cfg|
+      HOSTS.each do |host|
+        next unless cfg[host].is_a?(Hash)
+        incumbent = @reg.model(cfg[host].dig("order", 0, "model").to_s)
+        Array(cfg[host]["candidates"]).each do |c|
+          m = @reg.model(c["model"]) or next
+          Array(m["local_eval"]).select { |e| e["class"] == klass && e["host"] == host }.each do |e|
+            base = Array(incumbent && incumbent["local_eval"]).find { |x| x["category"] == e["category"] && x["host"] == host }
+            ready = e["sample_size"].to_i >= bar.fetch("min_sample_size", 9) &&
+                    e.fetch("median_repair_loops", 0).to_f <= bar.fetch("max_median_repair_loops", 1).to_f &&
+                    (e.dig("seeded_defect", "recall").nil? || e.dig("seeded_defect", "recall").to_f >= bar.fetch("min_seeded_defect_recall", 1.0).to_f) &&
+                    (base.nil? || base["pass_rate"].to_f - e["pass_rate"].to_f <= bar.fetch("max_pass_rate_drop_vs_incumbent", 0.05).to_f)
+            if ready && base
+              info("promotion", "#{m['id']} clears the local-eval bar for #{klass}/#{host} (#{e['category']}); propose promotion")
+            elsif ready
+              info("promotion", "#{m['id']} meets the bar for #{klass}/#{host} (#{e['category']}) but the incumbent has no comparable run")
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+# ---------------------------------------------------------------- CLI
+
+def print_resolution(r)
+  puts "status:  #{r['status']}"
+  puts "host:    #{r['host']}#{r['runtime_version'] ? " (runtime #{r['runtime_version']})" : ''}"
+  puts "class:   #{r['class']}#{r['role'] ? "  role: #{r['role']}" : ''}"
+  puts "model:   #{r['model']}#{r['model_status'] ? " [#{r['model_status']}]" : ''}" if r["model"]
+  puts "effort:  #{r['effort'] || 'n/a'}#{r['tier'] ? " (tier #{r['tier']})" : ''}" if r["model"]
+  if (d = r["dispatch"])
+    puts "dispatch:"
+    d.each { |k, v| puts "  #{k}: #{v.is_a?(Array) ? v.join(' ') : v.inspect}" unless v.nil? }
+  end
+  if (e = r["evidence"])
+    puts "evidence: listed=#{e['listed'].join(',')} accessible=#{e['accessible']} observed=#{e['observed']}"
+  end
+  r["fallbacks"].each { |f| puts "fallback: #{f}" }
+  r["notes"].compact.each { |n| puts "note:    #{n}" }
+  puts "requested_model: #{r['requested_model']}" if r["requested_model"]
+  puts "suggestion: #{r['suggestion']}" if r["suggestion"]
+  c = Array(r["candidates_awaiting_evidence"])
+  puts "candidates awaiting evidence (not auto-selected): #{c.join(', ')}" unless c.empty?
+end
+
+def main(argv)
+  command = argv.shift
+  opts = { registry: File.join(SKILL_ROOT, "registry", "models.yaml"), home: Dir.home, today: Date.today }
+  parser = OptionParser.new do |o|
+    o.banner = "usage: model-routing resolve|check [options]"
+    o.on("--registry PATH") { |v| opts[:registry] = v }
+    o.on("--home PATH", "home directory for user config (tests)") { |v| opts[:home] = v }
+    o.on("--today DATE") { |v| opts[:today] = Date.parse(v) }
+    o.on("--host HOST", HOSTS) { |v| opts[:host] = v }
+    o.on("--class CLASS") { |v| opts[:class] = v }
+    o.on("--role ROLE") { |v| opts[:role] = v }
+    o.on("--tier TIER", "light|standard|deep|extended") { |v| opts[:tier] = v }
+    o.on("--escalation TEXT", "required for the extended tier") { |v| opts[:escalation] = v }
+    o.on("--user-model ID") { |v| opts[:user_model] = v }
+    o.on("--project-model ID") { |v| opts[:project_model] = v }
+    o.on("--user-effort LEVEL", "explicit user request, including max") { |v| opts[:user_effort] = v }
+    o.on("--listed IDS", Array, "override discovery (e.g. Agent tool aliases)") { |v| opts[:listed] = v }
+    o.on("--allow-upward", "permit moving up one class when none is available") { opts[:allow_upward] = true }
+    o.on("--cross-family", "resolve on the other provider's host") { opts[:cross_family] = true }
+    o.on("--strict", "check: exit 1 when any warning is found") { opts[:strict] = true }
+    o.on("--json") { opts[:json] = true }
+  end
+  parser.parse!(argv)
+  registry = Registry.new(opts[:registry])
+  env = Environment.new(registry, home: opts[:home], today: opts[:today])
+
+  case command
+  when "resolve"
+    r = Resolver.new(env).resolve(opts)
+    opts[:json] ? puts(JSON.pretty_generate(r)) : print_resolution(r)
+    r["status"] == "ok" || r["status"] == "primary_interactive" ? 0 : 3
+  when "check"
+    findings = Checker.new(env).run
+    if opts[:json]
+      puts JSON.pretty_generate(findings.map(&:to_h))
+    else
+      findings.group_by(&:area).each do |area, list|
+        puts "-- #{area} --"
+        list.each { |f| puts "  [#{f.level}] #{f.message}" }
+      end
+      w = findings.count { |f| f.level == "WARN" }
+      e = findings.count { |f| f.level == "ERROR" }
+      puts
+      puts "#{e} error(s), #{w} warning(s). Errors are runtime-isolation or install failures and fail this check; " \
+           "registry warnings never block workflow execution#{opts[:strict] ? '' : ' (use --strict to fail on them)'}."
+    end
+    return 1 if findings.any? { |f| f.level == "ERROR" }
+    opts[:strict] && findings.any? { |f| f.level == "WARN" } ? 1 : 0
+  else
+    warn parser.banner
+    2
+  end
+rescue UsageError, OptionParser::ParseError => e
+  warn "model-routing: #{e.message}"
+  2
+end
+
+exit(main(ARGV.dup)) if $PROGRAM_NAME == __FILE__

@@ -1,0 +1,340 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Focused tests for model-routing. Uses fixture homes and fake `claude`/`codex`
+# binaries; never reads real user config or calls a model.
+
+Encoding.default_external = Encoding::UTF_8
+Encoding.default_internal = Encoding::UTF_8
+
+require "fileutils"
+require "json"
+require "minitest/autorun"
+require "open3"
+require "tmpdir"
+require "yaml"
+
+SKILL = File.expand_path("..", File.dirname(File.realpath(__FILE__)))
+SCRIPT = File.join(SKILL, "scripts", "model-routing")
+REGISTRY = File.join(SKILL, "registry", "models.yaml")
+
+class ModelRoutingTest < Minitest::Test
+  def setup
+    @dir = Dir.mktmpdir("model-routing-test")
+    @home = File.join(@dir, "home")
+    @bin = File.join(@dir, "bin")
+    FileUtils.mkdir_p([@bin, File.join(@home, ".codex"), File.join(@home, ".claude")])
+    fake_cli("claude", "2.1.284 (Claude Code)")
+    fake_cli("codex", "codex-cli 0.159.2", bundled: %w[gpt-6-astra gpt-6.1-sol gpt-6-luna gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna])
+    catalog(%w[gpt-6-astra gpt-6.1-sol gpt-6-luna gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna])
+    install_roles
+  end
+
+  REPO = File.expand_path("..", SKILL)
+
+  # Mirrors scripts/install.sh: Claude roles as symlinks, Codex roles as copies.
+  def install_roles
+    FileUtils.mkdir_p([File.join(@home, ".claude", "agents"), File.join(@home, ".codex", "agents")])
+    Dir[File.join(REPO, "agents", "claude", "*.md")].each { |f| File.symlink(f, File.join(@home, ".claude", "agents", File.basename(f))) }
+    Dir[File.join(REPO, "agents", "codex", "*.toml")].each { |f| FileUtils.cp(f, File.join(@home, ".codex", "agents", File.basename(f))) }
+  end
+
+  def teardown = FileUtils.remove_entry(@dir)
+
+  def fake_cli(name, version, bundled: nil)
+    models = JSON.generate({ "models" => Array(bundled).map { |s| { "slug" => s } } })
+    File.write(File.join(@bin, name), <<~SH)
+      #!/bin/sh
+      if [ "$1" = "--version" ]; then echo "#{version}"; exit 0; fi
+      if [ "$1" = "debug" ]; then echo '#{models}'; exit 0; fi
+      exit 1
+    SH
+    FileUtils.chmod(0o755, File.join(@bin, name))
+  end
+
+  def catalog(slugs, client: "0.159.2")
+    data = { "fetched_at" => "2026-09-30T00:00:00Z", "client_version" => client,
+             "models" => slugs.map { |s| { "slug" => s, "visibility" => "list" } } }
+    File.write(File.join(@home, ".codex", "models_cache.json"), JSON.generate(data))
+  end
+
+  def run_tool(*args, registry: REGISTRY)
+    env = { "PATH" => "#{@bin}:/usr/bin:/bin", "CLAUDECODE" => nil, "CLAUDE_CODE_EXECPATH" => nil,
+            "CODEX_THREAD_ID" => nil, "CODEX_SANDBOX" => nil }
+    out, err, status = Open3.capture3(env, RbConfig.ruby, SCRIPT, *args, "--registry", registry,
+                                      "--home", @home, "--today", "2026-09-30")
+    [out, err, status.exitstatus]
+  end
+
+  def resolve(*args, **kw)
+    out, err, code = run_tool("resolve", *args, "--json", **kw)
+    [code.zero? || code == 3 ? JSON.parse(out) : nil, err, code]
+  end
+
+  # --- routing: newest is never automatically best -------------------------
+
+  def test_candidate_not_auto_selected_even_when_accessible
+    r, = resolve("--host", "codex", "--class", "capable-delegated")
+    assert_equal "gpt-5.6-terra", r["model"]
+    assert_includes r["candidates_awaiting_evidence"], "gpt-6.1-sol"
+  end
+
+  def test_next_promoted_candidate_when_preferred_missing
+    catalog(%w[gpt-6-astra gpt-5.6-sol])
+    r, = resolve("--host", "codex", "--class", "capable-delegated")
+    assert_equal "gpt-5.6-sol", r["model"]
+    assert(r["fallbacks"].any? { |f| f.include?("gpt-5.6-terra unavailable") })
+  end
+
+  def test_no_upward_move_without_permission
+    catalog(%w[gpt-6-astra gpt-5.6-terra])
+    r, _, code = resolve("--host", "codex", "--class", "efficient-bounded")
+    assert_equal 3, code
+    assert_equal "no_candidate", r["status"]
+    r, = resolve("--host", "codex", "--class", "efficient-bounded", "--allow-upward")
+    assert_equal "gpt-5.6-terra", r["model"]
+    assert(r["fallbacks"].any? { |f| f.include?("moved up to capable-delegated") })
+  end
+
+  def test_explicit_user_choice_never_substituted
+    catalog(%w[gpt-5.6-terra])
+    r, _, code = resolve("--host", "codex", "--class", "capable-delegated", "--user-model", "gpt-6.1-sol")
+    assert_equal 3, code
+    assert_equal "explicit_choice_unavailable", r["status"]
+    assert_nil r["model"]
+  end
+
+  def test_explicit_user_choice_honored_when_available
+    r, = resolve("--host", "codex", "--class", "capable-delegated", "--user-model", "gpt-6.1-sol")
+    assert_equal "gpt-6.1-sol", r["model"]
+  end
+
+  # --- effort is separate and gated ----------------------------------------
+
+  def test_effort_ceiling_and_escalation_gate
+    _, err, code = resolve("--host", "codex", "--class", "frontier-judgment", "--tier", "extended")
+    assert_equal 2, code
+    assert_match(/escalation/, err)
+    r, = resolve("--host", "codex", "--class", "frontier-judgment", "--tier", "extended",
+                 "--escalation", "high failed twice on reasoning; evidence in notes")
+    assert_equal "xhigh", r["effort"]
+    _, err, code = resolve("--host", "codex", "--class", "frontier-judgment", "--tier", "max")
+    assert_equal 2, code
+    assert_match(/never automatic/, err)
+    r, = resolve("--host", "codex", "--class", "frontier-judgment", "--user-effort", "max")
+    assert_equal "max", r["effort"]
+  end
+
+  def test_default_efforts_never_exceed_high
+    %w[efficient-bounded capable-delegated frontier-judgment].each do |klass|
+      %w[codex claude-code].each do |host|
+        r, = resolve("--host", host, "--class", klass)
+        assert_includes %w[low medium high], r["effort"], "#{klass}/#{host}"
+      end
+    end
+  end
+
+  # --- delegates do not inherit the primary session ------------------------
+
+  def test_codex_roles_run_as_isolated_headless_delegates
+    r, = resolve("--host", "codex", "--role", "wf-reviewer")
+    d = r["dispatch"]
+    assert_equal "wf-reviewer", d["role"]
+    assert_match(/codex-delegate/, d["mechanism"])
+    assert_equal "default", d["service_tier"]
+    assert_equal "read-only", d["sandbox"]
+    refute_includes d["command"], "--model" # the role file supplies the pinned model and effort
+    refute_equal "gpt-6-astra", r["model"]
+  end
+
+  def test_claude_role_pins_promoted_id_despite_alias_advance
+    r, = resolve("--host", "claude-code", "--role", "wf-reviewer")
+    assert_equal "claude-sonnet-5", r["model"] # sonnet alias -> 5.5 (candidate) on 2.1.284
+    assert_nil r["dispatch"]["model_param"]
+    assert_equal "medium", r["effort"]
+  end
+
+  def test_escalated_review_uses_deep_role
+    r, = resolve("--host", "claude-code", "--role", "wf-reviewer", "--class", "frontier-judgment")
+    assert_equal "wf-reviewer-deep", r["dispatch"]["subagent_type"]
+    assert_equal "high", r["effort"]
+  end
+
+  def test_escalated_implementation_keeps_write_access
+    r, = resolve("--host", "claude-code", "--role", "wf-implementer", "--class", "frontier-judgment")
+    assert_equal "wf-implementer", r["dispatch"]["subagent_type"]
+    assert_equal "workspace-write", r["dispatch"]["access"]
+    assert_equal "opus", r["dispatch"]["model_param"]
+    assert_equal "medium", r["dispatch"]["effort_actual"] # disclosed: effort comes from the definition
+    r, = resolve("--host", "codex", "--role", "wf-implementer", "--class", "frontier-judgment")
+    assert_equal "workspace-write", r["dispatch"]["sandbox"]
+    assert_includes r["dispatch"]["command"].join(" "), "--role wf-implementer --cwd <repo> --model gpt-6-astra --effort high"
+  end
+
+  def test_escalated_exploration_stays_read_only
+    %w[claude-code codex].each do |host|
+      r, = resolve("--host", host, "--role", "wf-explorer", "--class", "capable-delegated")
+      assert_equal "wf-explorer", r["dispatch"]["role"], host
+      assert_equal "read-only", r["dispatch"]["access"], host
+    end
+  end
+
+  def test_class_without_role_does_not_pick_write_access
+    r, = resolve("--host", "claude-code", "--class", "capable-delegated")
+    assert_equal "choose a role", r["dispatch"]["mechanism"]
+    assert_nil r["dispatch"]["subagent_type"]
+  end
+
+  def test_codex_fallback_sets_standard_tier_explicitly
+    File.write(File.join(@home, ".codex", "config.toml"), "model = \"gpt-6-astra\"\nservice_tier = \"priority\"\n")
+    r, = resolve("--host", "codex", "--role", "wf-reviewer", "--user-model", "gpt-5.6-sol")
+    d = r["dispatch"]
+    assert_match(/codex-delegate/, d["mechanism"])
+    assert_equal "default", d["service_tier"]
+    assert_equal "read-only", d["sandbox"]
+    assert_includes d["command"].join(" "), "--role wf-reviewer --cwd <repo> --model gpt-5.6-sol"
+  end
+
+  def test_primary_interactive_is_user_choice
+    r, = resolve("--host", "claude-code", "--class", "primary-interactive")
+    assert_equal "primary_interactive", r["status"]
+    assert(r["notes"].any? { |n| n.include?("Never auto-select or downgrade") })
+  end
+
+  def test_cross_family_uses_read_only_headless_standard_tier
+    r, = resolve("--host", "claude-code", "--class", "frontier-judgment", "--cross-family")
+    assert_equal "codex", r["host"]
+    d = r["dispatch"]
+    assert_match(/codex-delegate/, d["mechanism"])
+    assert_equal "read-only", d["sandbox"]
+    assert_equal "default", d["service_tier"]
+  end
+
+  # --- check ---------------------------------------------------------------
+
+  def check(*args, registry: REGISTRY)
+    out, _, code = run_tool("check", "--json", *args, registry: registry)
+    [JSON.parse(out), code]
+  end
+
+  def messages(findings, level) = findings.select { |f| f["level"] == level }.map { |f| f["message"] }
+
+  def test_check_flags_new_model_as_candidate_and_warns_only
+    catalog(%w[gpt-6-astra gpt-5.6-terra gpt-5.6-luna gpt-5.6-sol gpt-7-nova])
+    findings, code = check
+    assert_equal 0, code
+    assert(messages(findings, "WARN").any? { |m| m.include?("gpt-7-nova") && m.include?("candidate") })
+    _, _, strict_code = run_tool("check", "--strict")
+    assert_equal 1, strict_code
+  end
+
+  def test_check_flags_stale_entries
+    findings, = check
+    refute(findings.any? { |f| f["area"] == "staleness" && f["level"] == "WARN" })
+    env = { "PATH" => "#{@bin}:/usr/bin:/bin", "CLAUDECODE" => nil, "CLAUDE_CODE_EXECPATH" => nil }
+    out, = Open3.capture3(env, RbConfig.ruby, SCRIPT, "check", "--json", "--registry", REGISTRY,
+                          "--home", @home, "--today", "2026-12-15")
+    assert(JSON.parse(out).any? { |f| f["area"] == "staleness" && f["level"] == "WARN" })
+  end
+
+  def test_check_flags_missing_promoted_model_and_old_cli
+    catalog(%w[gpt-6-astra gpt-5.6-sol gpt-5.6-luna], client: "0.155.0")
+    fake_cli("codex", "codex-cli 0.155.0")
+    findings, = check
+    assert(messages(findings, "WARN").any? { |m| m.include?("promoted gpt-5.6-terra is not in the account catalog") })
+    assert(messages(findings, "INFO").any? { |m| m.include?("older than 0.159.1") })
+  end
+
+  def test_check_flags_config_drift_and_inherited_delegate_cost
+    File.write(File.join(@home, ".claude", "settings.json"),
+               JSON.generate({ "model" => "opus", "modelSettings" => { "claude-sonnet-5" => { "effortLevel" => "high" } } }))
+    File.write(File.join(@home, ".codex", "config.toml"), "model = \"gpt-6-astra\"\nmodel_reasoning_effort = \"high\"\nservice_tier = \"priority\"\n")
+    findings, = check
+    warns = messages(findings, "WARN")
+    assert(warns.any? { |m| m.include?("modelSettings has claude-sonnet-5 but not claude-sonnet-5-5") })
+    assert(warns.any? { |m| m.include?("inherit") && m.include?("service_tier=priority") })
+  end
+
+  def test_installed_roles_in_sync_pass
+    findings, code = check
+    assert_equal 0, code, messages(findings, "ERROR").inspect
+    assert_equal 8, findings.count { |f| f["area"] == "install" && f["level"] == "OK" }
+  end
+
+  def test_uninstalled_or_drifted_roles_are_errors_that_fail_the_check
+    FileUtils.rm(File.join(@home, ".claude", "agents", "wf-explorer.md"))
+    File.write(File.join(@home, ".codex", "agents", "wf-reviewer.toml"), "# Engineering-workflow delegate role\nname = \"x\"\n")
+    findings, code = check
+    errors = messages(findings, "ERROR")
+    assert_equal 1, code
+    assert(errors.any? { |m| m.include?("Claude wf-explorer: not installed") })
+    assert(errors.any? { |m| m.include?("Codex wf-reviewer: installed copy differs") })
+  end
+
+  def test_symlinked_codex_role_counts_as_not_installed
+    target = File.join(@home, ".codex", "agents", "wf-explorer.toml")
+    FileUtils.rm(target)
+    File.symlink(File.join(REPO, "agents", "codex", "wf-explorer.toml"), target)
+    findings, code = check
+    assert_equal 1, code
+    assert(messages(findings, "ERROR").any? { |m| m.include?("symlink, which Codex cannot load") })
+  end
+
+  def test_broken_claude_symlink_is_an_error
+    target = File.join(@home, ".claude", "agents", "wf-reviewer.md")
+    FileUtils.rm(target)
+    File.symlink(File.join(@dir, "gone.md"), target)
+    findings, = check
+    assert(messages(findings, "ERROR").any? { |m| m.include?("Claude wf-reviewer: broken symlink") })
+  end
+
+  def test_read_only_claude_roles_carry_fail_closed_guard
+    findings, = check
+    refute(findings.any? { |f| f["area"] == "isolation" && f["level"] == "ERROR" }, findings.select { |f| f["area"] == "isolation" }.inspect)
+    %w[wf-explorer wf-reviewer wf-reviewer-deep].each do |n|
+      text = File.read(File.join(REPO, "agents", "claude", "#{n}.md"))
+      assert_includes text, "readonly-bash-guard\" || exit 2"
+    end
+  end
+
+  def test_repo_agent_files_match_registry_roles
+    findings, = check
+    agent = findings.select { |f| f["area"] == "agents" }
+    refute(agent.any? { |f| f["level"] == "WARN" }, agent.inspect)
+    assert_equal 8, agent.count { |f| f["level"] == "OK" }
+  end
+
+  def test_local_eval_hook_proposes_promotion_without_auto_selecting
+    data = YAML.safe_load(File.read(REGISTRY), permitted_classes: [Date])
+    luna = data["models"].find { |m| m["id"] == "gpt-6-luna" }
+    luna["local_eval"] = [{ "category" => "repo-exploration", "class" => "efficient-bounded", "host" => "codex",
+                            "effort" => "high", "date" => "2026-10-05", "sample_size" => 9, "pass_rate" => 0.89,
+                            "median_repair_loops" => 0, "cost_per_success_usd" => 0.03 }]
+    incumbent = data["models"].find { |m| m["id"] == "gpt-5.6-luna" }
+    incumbent["local_eval"] = [{ "category" => "repo-exploration", "class" => "efficient-bounded", "host" => "codex",
+                                 "effort" => "low", "date" => "2026-10-05", "sample_size" => 9, "pass_rate" => 0.89,
+                                 "median_repair_loops" => 0, "cost_per_success_usd" => 0.05 }]
+    path = File.join(@dir, "registry.yaml")
+    File.write(path, YAML.dump(data))
+    findings, = check(registry: path)
+    assert(messages(findings, "INFO").any? { |m| m.include?("gpt-6-luna clears the local-eval bar") })
+    r, = resolve("--host", "codex", "--class", "efficient-bounded", registry: path)
+    assert_equal "gpt-5.6-luna", r["model"]
+  end
+
+  # --- policy files carry no model identity --------------------------------
+
+  def test_policy_files_name_no_models
+    ids = YAML.safe_load(File.read(REGISTRY), permitted_classes: [Date])["models"].flat_map { |m| [m["id"], *Array(m["aliases"])] }
+    ids = ids.reject { |a| %w[opus sonnet haiku fable].include?(a) } # family words may appear in prose
+    files = [File.join(SKILL, "SKILL.md"), *Dir[File.join(SKILL, "references", "*.md")]]
+    files.each do |path|
+      text = File.read(path)
+      hits = ids.select { |id| text.include?(id) }
+      assert_empty hits, "#{path} names concrete models: #{hits.join(', ')}"
+    end
+    code = File.readlines(SCRIPT).reject { |l| l.strip.start_with?("#") }.join
+    hits = ids.select { |id| code.include?(id) }
+    assert_empty hits, "model-routing logic names concrete models: #{hits.join(', ')}"
+  end
+end

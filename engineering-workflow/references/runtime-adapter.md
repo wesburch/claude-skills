@@ -13,12 +13,23 @@ bounded waits rather than frequent polling.
 
 ## Native agents
 
-Use the host's documented dispatch controls, selecting model and effort explicitly
-where exposed. Start with a fresh context (`fork_turns: "none"` in runtimes that
-support it). Do not copy a transcript to compensate for an incomplete packet.
-For Claude native dispatch, use supported model selectors; for Codex, use the
-exposed model/effort fields or verified agent configuration. If a runtime cannot
-override them, disclose inheritance instead of claiming economical routing.
+Dispatch the `wf-*` role the [resolver](resolver.md) names: `wf-explorer`,
+`wf-implementer`, `wf-reviewer` or `wf-reviewer-deep`. Each role sets its own
+model, effort, tier and sandbox so it does not inherit the session's; the runtime
+smoke test (`scripts/runtime-smoke-test`) verifies this from observed evidence. Start with
+a fresh context (`fork_turns: "none"` in runtimes that support it). Do not copy a
+transcript to compensate for an incomplete packet.
+
+- Claude Code: dispatch the role by name; pass a per-invocation `model` alias only
+  when the resolver says so. Effort comes from the role definition; read-only roles
+  are enforced by their Bash guard hook.
+- Codex: run the role through `scripts/codex-delegate` (a separate headless
+  process with every setting explicit). Do not use in-process Codex children for
+  workflow roles.
+
+When the roles are not installed and in sync (`scripts/install.sh`, then
+`scripts/doctor.sh`), or a runtime cannot set model and effort, disclose the
+inheritance instead of claiming economical routing.
 
 Pass only the assigned role and required instructions to children so they do not
 restart the entire workflow. Keep worker fan-out bounded by available slots and
@@ -32,9 +43,12 @@ guidance only when local help leaves an execution question unresolved.
 
 Codex CLI commonly supports `exec`, `--model`, `--sandbox read-only`, `--cd`,
 `--output-last-message`, `--json`, and `-c model_reasoning_effort=...`; verify
-against the installed version. Feed the packet through stdin (`-`). For Claude,
-verify print/headless mode, model and tool restrictions, and supported effort
-options from its installed help. Do not assume flags are identical across CLIs.
+against the installed version. Pass `-c service_tier="default"` so a headless
+delegate runs on the standard tier whatever `config.toml` sets. Feed the packet
+through stdin (`-`). For Claude, verify print/headless mode, `--model`,
+`--effort`, and tool restrictions (`--tools`, `--permission-mode`) from its
+installed help. Do not assume flags are identical across CLIs.
+`scripts/model-routing resolve --cross-family` prints a starting command.
 
 Pass arbitrary prompts through stdin or a safely handled file, never interpolate
 them into shell commands. Use a unique temporary directory for stdout, stderr,

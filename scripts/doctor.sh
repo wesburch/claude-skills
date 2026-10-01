@@ -8,6 +8,8 @@
 # own install/update mechanisms and are out of scope here.
 #
 # Read-only: reports problems, fixes nothing. Exit 0 if clean, 1 if issues.
+# Model-registry drift is reported as warnings and never changes the exit code;
+# runtime-isolation and install errors from model-routing do.
 
 set -uo pipefail
 
@@ -49,6 +51,23 @@ check_link() {
   pass "$label"
 }
 
+# check_copy <label> <target> <source>: a real file identical to the source.
+check_copy() {
+  local label="$1"
+  local target="$2"
+  local expected_source="$3"
+
+  if [[ -L "$target" ]]; then
+    fail "$label: is a symlink; Codex cannot load symlinked agents (rerun install.sh)"
+  elif [[ ! -f "$target" ]]; then
+    fail "$label: missing ($target)"
+  elif ! cmp -s "$target" "$expected_source"; then
+    fail "$label: installed copy differs from $expected_source (rerun install.sh)"
+  else
+    pass "$label (copy in sync)"
+  fi
+}
+
 echo "== Personal skills (source: $REPO_ROOT) =="
 echo
 
@@ -76,6 +95,36 @@ if [[ -d "$REPO_ROOT/commands" ]]; then
     cmd_name="$(basename "$cmd_file")"
     check_link "$cmd_name" "$CLAUDE_COMMANDS/$cmd_name" "$cmd_file"
   done
+  echo
+fi
+
+if [[ -d "$REPO_ROOT/agents" ]]; then
+  echo "== Delegate roles (source: $REPO_ROOT/agents) =="
+  echo
+  for agent_file in "$REPO_ROOT"/agents/claude/*.md; do
+    [[ -f "$agent_file" ]] || continue
+    check_link "Claude $(basename "$agent_file")" "$HOME/.claude/agents/$(basename "$agent_file")" "$agent_file"
+  done
+  for agent_file in "$REPO_ROOT"/agents/codex/*.toml; do
+    [[ -f "$agent_file" ]] || continue
+    check_copy "Codex $(basename "$agent_file")" "$HOME/.codex/agents/$(basename "$agent_file")" "$agent_file"
+  done
+  echo
+fi
+
+ROUTING="$REPO_ROOT/engineering-workflow/scripts/model-routing"
+if [[ -x "$ROUTING" ]]; then
+  echo "== Model registry and runtime isolation (registry drift warns; isolation errors fail) =="
+  echo
+  "$ROUTING" check > "${TMPDIR:-/tmp}/doctor-routing.$$" 2>&1
+  routing_status=$?
+  sed 's/^/  /' "${TMPDIR:-/tmp}/doctor-routing.$$"
+  rm -f "${TMPDIR:-/tmp}/doctor-routing.$$"
+  if [[ "$routing_status" -eq 0 ]]; then
+    pass "model-routing check: no runtime-isolation or install errors"
+  else
+    fail "model-routing check reported runtime-isolation or install errors (exit $routing_status)"
+  fi
   echo
 fi
 

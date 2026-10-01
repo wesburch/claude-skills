@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Symlink every skill in this repo into Claude Code and Codex CLI's skill
-# directories, and every commands/*.md into Claude's slash-command directory.
+# directories, every commands/*.md into Claude's slash-command directory, and
+# every agents/claude/*.md delegate role into ~/.claude/agents (symlinks), and
+# every agents/codex/*.toml role into ~/.codex/agents as a real copy (Codex does
+# not load symlinked agent files).
+#
+# Usage: install.sh [--dry-run]   (--dry-run prints what would change)
 #
 # Non-destructive: only ever creates a new symlink or repoints a symlink that
 # already points somewhere inside this repo. If the target path exists and is
@@ -13,6 +18,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLAUDE_SKILLS="$HOME/.claude/skills"
 CODEX_SKILLS="$HOME/.codex/skills"
 CLAUDE_COMMANDS="$HOME/.claude/commands"
+CLAUDE_AGENTS="$HOME/.claude/agents"
+CODEX_AGENTS="$HOME/.codex/agents"
+
+DRY_RUN=0
+[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
 
 linked=0
 skipped=0
@@ -33,7 +43,11 @@ link_one() {
     if [[ "$current" == "$REPO_ROOT"/* ]]; then
       # Symlink already managed by this repo, just pointing at something
       # stale (e.g. a renamed skill) — safe to repoint.
-      ln -sfn "$source" "$target"
+      if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "  would repoint $target -> $source"
+      else
+        ln -sfn "$source" "$target"
+      fi
       linked=$((linked + 1))
       return
     fi
@@ -48,12 +62,50 @@ link_one() {
     return
   fi
 
-  mkdir -p "$(dirname "$target")"
-  ln -s "$source" "$target"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "  would link $target -> $source"
+  else
+    mkdir -p "$(dirname "$target")"
+    ln -s "$source" "$target"
+  fi
   linked=$((linked + 1))
 }
 
-echo "Installing personal skills from $REPO_ROOT"
+MANAGED_MARKER="# Engineering-workflow delegate role"
+
+# copy_one <target_path> <source_path>: install a managed copy. Replaces a
+# symlink into this repo or an outdated managed copy (identified by the marker
+# line); never touches any other file.
+copy_one() {
+  local target="$1"
+  local source="$2"
+
+  if [[ -f "$target" && ! -L "$target" ]] && cmp -s "$source" "$target"; then
+    skipped=$((skipped + 1))
+    return
+  fi
+  if [[ -L "$target" ]]; then
+    local current
+    current="$(readlink "$target")"
+    if [[ "$current" != "$REPO_ROOT"/* ]]; then
+      conflicts+=("$target (symlink -> $current)")
+      return
+    fi
+  elif [[ -e "$target" ]] && ! head -1 "$target" | grep -qF "$MANAGED_MARKER"; then
+    conflicts+=("$target (unmanaged file, not replaced)")
+    return
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "  would copy $source -> $target"
+  else
+    mkdir -p "$(dirname "$target")"
+    rm -f "$target"
+    cp "$source" "$target"
+  fi
+  linked=$((linked + 1))
+}
+
+echo "Installing personal skills from $REPO_ROOT$([[ "$DRY_RUN" -eq 1 ]] && echo ' (dry run)')"
 echo
 
 for skill_dir in "$REPO_ROOT"/*/; do
@@ -73,7 +125,18 @@ if [[ -d "$REPO_ROOT/commands" ]]; then
   done
 fi
 
-echo "Linked:  $linked"
+# Delegate roles (engineering-workflow registry roles). Only new files named
+# after a role are created; existing personal agents are never touched.
+for agent_file in "$REPO_ROOT"/agents/claude/*.md; do
+  [[ -f "$agent_file" ]] || continue
+  link_one "$CLAUDE_AGENTS/$(basename "$agent_file")" "$agent_file"
+done
+for agent_file in "$REPO_ROOT"/agents/codex/*.toml; do
+  [[ -f "$agent_file" ]] || continue
+  copy_one "$CODEX_AGENTS/$(basename "$agent_file")" "$agent_file"
+done
+
+echo "$([[ "$DRY_RUN" -eq 1 ]] && echo 'Would link' || echo 'Linked'):  $linked"
 echo "Already OK: $skipped"
 
 if [[ ${#conflicts[@]} -gt 0 ]]; then

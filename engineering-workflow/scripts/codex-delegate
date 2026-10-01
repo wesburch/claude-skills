@@ -1,0 +1,260 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# codex-delegate: run one workflow-managed Codex delegate as an isolated
+# headless process, then record requested / resolved / observed settings.
+#
+#   codex-delegate --role wf-explorer --cwd DIR [--model ID] [--effort LEVEL]
+#                  [--packet FILE] [--out DIR] [--timeout SECONDS] [--allow-non-git]
+#
+# Nothing is inherited from a live parent session or ~/.codex/config.toml:
+# the child runs with --ignore-user-config and --ignore-rules (no execpolicy
+# prefixes that could run commands outside the sandbox), hooks disabled, and
+# every setting explicit (model, effort, service_tier="default", sandbox from
+# the role's access, approvals never, multi-agent and agents disabled, the
+# working repo marked untrusted for this run only, role instructions). Observation comes from the
+# child's rollout (model, effort, sandbox) and Codex's own session/turn logs
+# (service tier). Exit 0 = isolation verified; 4 = an isolation guarantee was
+# not observed; 1 = the Codex run failed; 2 = usage error.
+
+Encoding.default_external = Encoding::UTF_8
+Encoding.default_internal = Encoding::UTF_8
+
+require "fileutils"
+require "json"
+require "open3"
+require "optparse"
+require "shellwords"
+require "time"
+require "timeout"
+require "tmpdir"
+require_relative "lib/routing_support"
+
+SKILL_ROOT = File.expand_path("..", File.dirname(File.realpath(__FILE__))) unless defined?(SKILL_ROOT)
+REPO_ROOT = File.expand_path("..", SKILL_ROOT) unless defined?(REPO_ROOT)
+DELEGATE_TIER = "default"
+LOG_FILTER = "codex_exec=info,codex_otel=info"
+
+module CodexDelegate
+  module_function
+
+  def role_file(role) = File.join(REPO_ROOT, "agents", "codex", "#{role}.toml")
+
+  def load_role(role)
+    path = role_file(role)
+    raise ArgumentError, "unknown role #{role} (no #{path})" unless File.exist?(path)
+    RoutingSupport.read_toml(path)
+  end
+
+  def sandbox_for(role_toml)
+    role_toml["sandbox_mode"] == "workspace-write" ? "workspace-write" : "read-only"
+  end
+
+  # The directory Codex would persist trust for: the git root, else the cwd.
+  def trust_root(cwd)
+    top, status = Open3.capture2("git", "-C", cwd, "rev-parse", "--show-toplevel", err: File::NULL)
+    File.realpath(status.success? && !top.strip.empty? ? top.strip : cwd)
+  rescue Errno::ENOENT
+    cwd
+  end
+
+  # The exact argv; every setting that must not inherit is explicit.
+  #   agents.enabled=false  removes spawn/collaboration tools, including the
+  #                         multi-agent v2 tools some models enable by default
+  #   projects.<root> untrusted  stops codex exec persisting project trust to
+  #                         ~/.codex/config.toml and skips project-local config
+  # Eval profile: local tools only. Web search, image generation and goals
+  # (which writes local goal state) are off, and the user's skill catalog is
+  # hidden (skills can point back into the repo that holds reference answers).
+  EVAL_PROFILE = ["-c", "web_search=\"disabled\"", "--disable", "image_generation", "--disable", "goals",
+                  "-c", "skills.include_instructions=false", "-c", "skills.bundled.enabled=false"].freeze
+
+  def build_command(role_toml, model:, effort:, cwd:, last_message:, allow_non_git: false, eval_profile: false)
+    argv = ["codex", "exec", "--json", "--ignore-user-config", "--ignore-rules",
+            "-m", model,
+            "-c", "model_reasoning_effort=#{JSON.generate(effort)}",
+            "-c", "service_tier=#{JSON.generate(DELEGATE_TIER)}",
+            "-c", "approval_policy=\"never\"",
+            "-c", "agents.enabled=false",
+            "-c", "projects={#{JSON.generate(trust_root(cwd))}={trust_level=\"untrusted\"}}",
+            "-c", "developer_instructions=#{JSON.generate(role_toml.fetch('developer_instructions'))}",
+            "--disable", "multi_agent",
+            "--disable", "hooks",
+            "--sandbox", sandbox_for(role_toml),
+            "-C", cwd,
+            "-o", last_message]
+    argv << "--skip-git-repo-check" if allow_non_git
+    argv.concat(EVAL_PROFILE) if eval_profile
+    argv << "-"
+    argv
+  end
+
+  # Child environment: drop the parent's Codex session/sandbox markers so the
+  # child applies its own sandbox; keep auth and CODEX_HOME.
+  def child_env(parent_env = ENV)
+    env = {}
+    parent_env.each_key { |k| env[k] = nil if k.start_with?("CODEX_") && k != "CODEX_HOME" }
+    env["RUST_LOG"] = LOG_FILTER
+    env
+  end
+
+  # --- observation ------------------------------------------------------
+
+  def thread_id(events_path)
+    File.foreach(events_path) do |l|
+      e = JSON.parse(l) rescue next
+      return e["thread_id"] if e["type"] == "thread.started"
+    end
+    nil
+  end
+
+  def rollout_for(thread_id, sessions_dir)
+    return nil unless thread_id
+    Dir.glob(File.join(sessions_dir, "**", "*#{thread_id}*.jsonl")).max_by { |f| File.mtime(f) }
+  end
+
+  def observe_rollout(path)
+    obs = { "models" => [], "efforts" => [], "sandboxes" => [], "approvals" => [], "collab_calls" => 0, "approved_prefixes" => [] }
+    return obs unless path && File.exist?(path)
+    File.foreach(path) do |l|
+      e = JSON.parse(l) rescue next
+      p = e["payload"] || {}
+      if e["type"] == "turn_context"
+        obs["models"] << p["model"] if p["model"]
+        obs["efforts"] << p["effort"] if p["effort"]
+        obs["sandboxes"] << p.dig("sandbox_policy", "type") if p.dig("sandbox_policy", "type")
+        obs["approvals"] << p["approval_policy"].to_s if p["approval_policy"]
+      end
+      obs["collab_calls"] += 1 if l.include?("\"collab_tool_call\"") || p["type"].to_s.start_with?("collab")
+      l.scan(/"approved_command_prefixes":(\[\[.*?\]\])/).each do |(json)|
+        obs["approved_prefixes"].concat(JSON.parse(json)) rescue obs["approved_prefixes"] << json
+      end
+    end
+    obs.transform_values { |v| v.is_a?(Array) ? v.uniq : v }
+  end
+
+  # Service tier as Codex requested it: the session's configured tier plus each
+  # completed model turn's telemetry. Real turns carry model_reasoning_effort and
+  # carry service_tier only for a non-standard tier; the zero-output warm-up
+  # request carries neither and is skipped. The server's own response field is
+  # not used: it reported "default" for a priority request.
+  def observe_tier(log_text)
+    line = log_text.each_line.find { |l| l.include?("SessionConfiguredEvent") }.to_s
+    session = line[/service_tier: Some\("([^"]+)"\)/, 1]
+    session ||= "none" if line.include?("service_tier: None")
+    completed = log_text.each_line.select { |l| l.include?("codex_otel.log_only") && l.include?("event.kind=response.completed") }
+    turns = completed.select { |l| l.include?("model_reasoning_effort=") }
+    turn_tiers = turns.map { |l| l[/service_tier="([^"]+)"/, 1] || "default" }
+    { "session" => session, "turns" => turn_tiers, "completed_turns" => turns.size, "skipped_warmup" => completed.size - turns.size }
+  end
+
+  def observed_tier(tier)
+    return nil if tier["session"].nil? || tier["completed_turns"].zero?
+    values = ([tier["session"] == "none" ? "default" : tier["session"]] + tier["turns"]).uniq
+    values.size == 1 ? values.first : values.join("+")
+  end
+
+  def usage(events_path)
+    total = Hash.new(0)
+    File.foreach(events_path) do |l|
+      e = JSON.parse(l) rescue next
+      next unless e["type"] == "turn.completed"
+      (e["usage"] || {}).each { |k, v| total[k] += v.to_i }
+    end
+    total
+  end
+
+  def summarize(role:, requested:, resolved:, events:, log:, rollout:, exit_status:, wall:, last_message:)
+    ro = observe_rollout(rollout)
+    tier = observe_tier(File.exist?(log) ? File.read(log) : "")
+    observed = {
+      "model" => ro["models"].size == 1 ? ro["models"].first : (ro["models"].empty? ? nil : ro["models"].join("+")),
+      "effort" => ro["efforts"].size == 1 ? ro["efforts"].first : (ro["efforts"].empty? ? nil : ro["efforts"].join("+")),
+      "service_tier" => observed_tier(tier),
+      "sandbox" => ro["sandboxes"].size == 1 ? ro["sandboxes"].first : (ro["sandboxes"].empty? ? nil : ro["sandboxes"].join("+"))
+    }
+    record = RoutingSupport.account(requested: requested, resolved: resolved, observed: observed)
+    failures = record["mismatches"].keys.map { |k| "#{k} mismatch" }
+    failures += %w[model effort service_tier sandbox].select { |k| observed[k].nil? }.map { |k| "#{k} unobserved" }
+    failures << "nested agent call observed" if ro["collab_calls"].positive?
+    failures << "execpolicy approved prefixes loaded (commands could run outside the sandbox)" unless ro["approved_prefixes"].empty?
+    record.merge(
+      "role" => role, "host" => "codex", "mechanism" => "headless codex exec",
+      "exit_status" => exit_status, "wall_seconds" => wall.round(1),
+      "usage" => File.exist?(events) ? usage(events) : {},
+      "tier_evidence" => tier.merge("source" => "Codex client request telemetry (SessionConfiguredEvent + per-turn otel); " \
+                                                 "the server's served tier is not independently confirmed"),
+      "approvals_observed" => ro["approvals"], "nested_agent_calls" => ro["collab_calls"],
+      "approved_command_prefixes" => ro["approved_prefixes"],
+      "rollout" => rollout, "events" => events, "log" => log, "last_message" => last_message,
+      "isolation_verified" => failures.empty? && exit_status.zero?, "isolation_failures" => failures
+    )
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  opts = { timeout: 1800, packet: "-" }
+  parser = OptionParser.new do |o|
+    o.banner = "usage: codex-delegate --role ROLE --cwd DIR [--model ID] [--effort LEVEL] [--packet FILE] [--out DIR]"
+    o.on("--role ROLE") { |v| opts[:role] = v }
+    o.on("--cwd DIR") { |v| opts[:cwd] = File.expand_path(v) }
+    o.on("--model ID", "resolver override; default is the role's model") { |v| opts[:model] = v }
+    o.on("--effort LEVEL", "resolver override; default is the role's effort") { |v| opts[:effort] = v }
+    o.on("--packet FILE", "packet file, or - for stdin") { |v| opts[:packet] = v }
+    o.on("--out DIR", "where events, logs and the record go") { |v| opts[:out] = v }
+    o.on("--timeout SECONDS", Integer) { |v| opts[:timeout] = v }
+    o.on("--allow-non-git") { opts[:allow_non_git] = true }
+    o.on("--dry-run", "print the command and exit") { opts[:dry_run] = true }
+    o.on("--eval", "eval tool profile: no web search, image generation or goals") { opts[:eval] = true }
+  end
+  begin
+    parser.parse!(ARGV)
+    raise OptionParser::MissingArgument, "--role and --cwd" unless opts[:role] && opts[:cwd]
+    role = CodexDelegate.load_role(opts[:role])
+  rescue OptionParser::ParseError, ArgumentError => e
+    warn "codex-delegate: #{e.message}"
+    exit 2
+  end
+  %w[max ultra xhigh].include?(opts[:effort]) && warn("codex-delegate: #{opts[:effort]} is never selected automatically; pass it only on explicit user request")
+
+  requested = { "model" => opts[:model] || role["model"], "effort" => opts[:effort] || role["model_reasoning_effort"],
+                "service_tier" => DELEGATE_TIER, "sandbox" => CodexDelegate.sandbox_for(role) }
+  resolved = requested.dup
+  out = opts[:out] || File.join(Dir.tmpdir, "codex-delegate-#{opts[:role]}-#{Time.now.strftime('%Y%m%d-%H%M%S')}-#{Process.pid}")
+  FileUtils.mkdir_p(out)
+  last_message = File.join(out, "last-message.md")
+  argv = CodexDelegate.build_command(role, model: resolved["model"], effort: resolved["effort"], cwd: opts[:cwd],
+                                           last_message: last_message, allow_non_git: opts[:allow_non_git],
+                                           eval_profile: opts[:eval])
+  if opts[:dry_run]
+    puts Shellwords.join(argv)
+    exit 0
+  end
+  packet = opts[:packet] == "-" ? $stdin.read : File.read(opts[:packet])
+  events = File.join(out, "events.jsonl")
+  log = File.join(out, "codex.log")
+  started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  status = nil
+  Open3.popen3(CodexDelegate.child_env, *argv) do |stdin, stdout, stderr, thread|
+    stdin.write(packet)
+    stdin.close
+    out_t = Thread.new { File.write(events, stdout.read) }
+    err_t = Thread.new { File.write(log, stderr.read) }
+    begin
+      Timeout.timeout(opts[:timeout]) { status = thread.value }
+    rescue Timeout::Error
+      Process.kill("TERM", thread.pid) rescue nil
+      status = thread.value
+    end
+    out_t.join
+    err_t.join
+  end
+  wall = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+  sessions = File.join(ENV.fetch("CODEX_HOME", File.join(Dir.home, ".codex")), "sessions")
+  rollout = CodexDelegate.rollout_for(CodexDelegate.thread_id(events), sessions)
+  record = CodexDelegate.summarize(role: opts[:role], requested: requested, resolved: resolved, events: events, log: log,
+                                   rollout: rollout, exit_status: status&.exitstatus || 1, wall: wall, last_message: last_message)
+  File.write(File.join(out, "record.json"), JSON.pretty_generate(record))
+  puts JSON.pretty_generate(record)
+  exit(record["exit_status"].zero? ? (record["isolation_verified"] ? 0 : 4) : 1)
+end

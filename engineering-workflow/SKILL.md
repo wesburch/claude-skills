@@ -33,8 +33,8 @@ task shape. State the choice and reason in one sentence, then proceed.
 
 | Profile | Default process |
 |---|---|
-| Quick | Current agent implements and checks a bounded, low-risk change; no mandatory reviewer, coordinator or task artifact |
-| Standard | One implementer runs the checks; one independent reviewer assesses the final diff and evidence; no separate verifier |
+| Quick | Current agent implements a bounded, low-risk change: name the proving check before editing, run it on the final change, report the command and result. No reviewer, coordinator or task artifact; an interactive edit stays with the host (batch/headless mechanical work may route to `efficient-bounded`) |
+| Standard | One implementer runs the checks; one independent reviewer assesses the final diff and evidence on SPEC and STANDARDS; no separate verifier or coordinator |
 | Full | Standard assurance plus the coordination, integration checks or specialist review justified by concrete dependencies/risks; load [advanced.md](references/advanced.md) |
 
 Choose by consequences of error, not task name, tracking directory, line count
@@ -53,6 +53,9 @@ Full may simplify to standard as dependencies disappear, without restarting.
 - Work locally by default. Delegate only a bounded independent assignment or
   required review; the main session should not become a coordinator for a single
   implementer merely because the task has an ID.
+- Delegates run as `wf-*` roles with their own model, effort and service tier;
+  they never inherit the session's settings by default. The session model is the
+  user's choice and is never downgraded by routing.
 - Read the assigned packet and relevant source once; use narrow searches and
   changed regions on follow-up. Load reference files only when their decision
   point is reached. Keep tool output to findings, failures and useful summaries.
@@ -75,11 +78,13 @@ Full may simplify to standard as dependencies disappear, without restarting.
   visual checks; the independent reviewer spot-checks consequential evidence.
   Preserve real exit codes when filtering logs. Use visual judgment when needed.
 - Standard/full review uses an instance that did not author the change. Supply
-  requirements, final diff, and current verification evidence; see
-  [delegation.md](references/delegation.md). If independent review is unavailable,
-  finish useful implementation/checks and report review as outstanding; do not
-  silently claim self-review satisfies the gate or mark review-gated work ready
-  to merge. Add another reviewer only for a distinct unresolved risk.
+  the original requirement source, the reviewed revision and final diff, and
+  current verification evidence; the reviewer returns SPEC and STANDARDS findings
+  and one verdict (see [delegation.md](references/delegation.md)). If independent
+  review is unavailable, finish useful implementation/checks and report review as
+  outstanding; do not silently claim self-review satisfies the gate or mark
+  review-gated work ready to merge. Add another reviewer only for a distinct
+  unresolved risk.
 - Resolve verification failures before final review. An investigative review
   may help diagnose a failure, but does not count as completion approval.
 - Repair defects and rerun checks affected by the change, including required
@@ -97,12 +102,15 @@ as well; changing the shared skill alone cannot remove a stronger repo override.
 
 ## Load only what changes the next decision
 
-- Before delegating or choosing a different model: [routing.md](references/routing.md).
-  That policy is also reusable for research and documentation assignments.
+- Before delegating or choosing a capability class or effort:
+  [routing.md](references/routing.md). That policy is also reusable for research
+  and documentation assignments.
 - Before dispatching: [delegation.md](references/delegation.md) and the relevant
   adapter in [runtime-adapter.md](references/runtime-adapter.md). No dispatch,
   no runtime discovery. Main session should fill a useful role.
-- For concrete child model selection: [model-registry.md](references/model-registry.md).
+- At the first dispatch of a session, for the concrete model and effort:
+  [resolver.md](references/resolver.md); models are data in
+  [registry/models.yaml](registry/models.yaml).
 - For repeated failures: routing's bounded recovery; do not repeat an unchanged approach.
 - For a reusable decision or discovery at completion:
   [knowledge-handoff.md](references/knowledge-handoff.md). Routine changes skip it.

@@ -1,0 +1,202 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Deterministic tests for codex-delegate (command construction, environment
+# isolation, observation parsing) and requested/resolved/observed accounting.
+# Uses fixture logs and rollouts; never calls Codex or a model.
+
+Encoding.default_external = Encoding::UTF_8
+Encoding.default_internal = Encoding::UTF_8
+
+require "fileutils"
+require "json"
+require "minitest/autorun"
+require "tmpdir"
+
+DIR = File.dirname(File.realpath(__FILE__))
+load File.join(DIR, "codex-delegate")
+
+class CodexDelegateTest < Minitest::Test
+  def setup
+    @dir = Dir.mktmpdir("codex-delegate-test")
+    @role = CodexDelegate.load_role("wf-explorer")
+  end
+
+  def teardown = FileUtils.remove_entry(@dir)
+
+  def test_command_sets_every_isolation_setting_explicitly
+    argv = CodexDelegate.build_command(@role, model: "gpt-5.6-luna", effort: "low", cwd: "/repo", last_message: "/tmp/m.md")
+    cmd = argv.join(" ")
+    assert_includes cmd, "--ignore-user-config"
+    assert_includes cmd, "-m gpt-5.6-luna"
+    assert_includes cmd, 'model_reasoning_effort="low"'
+    assert_includes cmd, 'service_tier="default"'
+    assert_includes cmd, 'approval_policy="never"'
+    assert_includes cmd, "--disable multi_agent"
+    assert_includes cmd, "--disable hooks"
+    assert_includes cmd, "--ignore-rules"
+    assert_includes cmd, "agents.enabled=false"
+    assert_match(/projects=\{".*"=\{trust_level="untrusted"\}\}/, cmd)
+    assert_includes cmd, "--sandbox read-only"
+    assert_includes cmd, "developer_instructions="
+    refute_includes cmd, "dangerously"
+    assert_equal "-", argv.last
+  end
+
+  def test_trust_root_is_the_git_toplevel
+    repo = File.join(@dir, "repo")
+    FileUtils.mkdir_p(File.join(repo, "sub"))
+    system("git", "-C", repo, "init", "-q")
+    assert_equal File.realpath(repo), CodexDelegate.trust_root(File.join(repo, "sub"))
+    plain = File.join(@dir, "plain")
+    FileUtils.mkdir_p(plain)
+    assert_equal File.realpath(plain), CodexDelegate.trust_root(plain)
+  end
+
+  def test_eval_profile_removes_network_and_state_tools
+    argv = CodexDelegate.build_command(@role, model: "m", effort: "low", cwd: "/repo", last_message: "/tmp/m.md", eval_profile: true)
+    cmd = argv.join(" ")
+    assert_includes cmd, 'web_search="disabled"'
+    assert_includes cmd, "--disable image_generation"
+    assert_includes cmd, "--disable goals"
+    assert_includes cmd, "skills.include_instructions=false"
+    assert_includes cmd, "skills.bundled.enabled=false"
+    refute_includes CodexDelegate.build_command(@role, model: "m", effort: "low", cwd: "/repo", last_message: "/tmp/m.md").join(" "), "image_generation"
+  end
+
+  def test_implementer_gets_workspace_write
+    role = CodexDelegate.load_role("wf-implementer")
+    argv = CodexDelegate.build_command(role, model: "gpt-5.6-terra", effort: "medium", cwd: "/repo", last_message: "/tmp/m.md")
+    assert_includes argv.join(" "), "--sandbox workspace-write"
+  end
+
+  def test_child_env_drops_parent_session_markers_but_keeps_codex_home
+    env = CodexDelegate.child_env({ "CODEX_SANDBOX" => "seatbelt", "CODEX_THREAD_ID" => "x", "CODEX_HOME" => "/h", "PATH" => "/bin" })
+    assert env.key?("CODEX_SANDBOX") && env["CODEX_SANDBOX"].nil?
+    assert env.key?("CODEX_THREAD_ID") && env["CODEX_THREAD_ID"].nil?
+    refute env.key?("CODEX_HOME")
+    assert_equal LOG_FILTER, env["RUST_LOG"]
+  end
+
+  LOG_DEFAULT = <<~LOG
+    2026-09-30T21:22:07Z INFO codex_exec: Codex initialized with event: SessionConfiguredEvent { model: "gpt-5.6-luna", service_tier: Some("default"), approval_policy: Never }
+    2026-09-30T21:22:09Z INFO codex_otel.log_only: event.name="codex.sse_event" event.kind=response.completed input_token_count=10 model=gpt-5.6-luna
+    2026-09-30T21:22:12Z INFO codex_otel.log_only: event.name="codex.sse_event" event.kind=response.completed input_token_count=12 model=gpt-5.6-luna model_reasoning_effort="low"
+  LOG
+
+  LOG_PRIORITY = <<~LOG
+    2026-09-30T21:22:13Z INFO codex_exec: Codex initialized with event: SessionConfiguredEvent { model: "gpt-5.6-luna", service_tier: Some("priority"), approval_policy: Never }
+    2026-09-30T21:22:14Z INFO codex_otel.log_only: event.name="codex.sse_event" event.kind=response.completed input_token_count=13840 output_token_count=0 model=gpt-5.6-luna
+    2026-09-30T21:22:16Z INFO codex_otel.log_only: event.name="codex.sse_event" event.kind=response.completed model=gpt-5.6-luna service_tier="priority" model_reasoning_effort="low"
+  LOG
+
+  def test_tier_observation_distinguishes_standard_from_priority
+    assert_equal "default", CodexDelegate.observed_tier(CodexDelegate.observe_tier(LOG_DEFAULT))
+    assert_equal "priority", CodexDelegate.observed_tier(CodexDelegate.observe_tier(LOG_PRIORITY))
+  end
+
+  def test_warmup_request_without_effort_is_not_counted_as_a_turn
+    tier = CodexDelegate.observe_tier(LOG_PRIORITY)
+    assert_equal 1, tier["skipped_warmup"]
+    assert_equal ["priority"], tier["turns"]
+    assert_equal 1, CodexDelegate.observe_tier(LOG_DEFAULT)["skipped_warmup"]
+  end
+
+  def test_tier_is_unobserved_without_completed_turns
+    assert_nil CodexDelegate.observed_tier(CodexDelegate.observe_tier(""))
+    session_only = LOG_DEFAULT.lines.first
+    assert_nil CodexDelegate.observed_tier(CodexDelegate.observe_tier(session_only))
+  end
+
+  def fixture_run(log:, model: "gpt-5.6-luna", effort: "low", sandbox: "read-only", collab: false, exit_status: 0, prefixes: nil)
+    rollout = File.join(@dir, "rollout.jsonl")
+    ctx = { "model" => model, "effort" => effort, "sandbox_policy" => { "type" => sandbox }, "approval_policy" => "never" }
+    ctx["approved_command_prefixes"] = prefixes if prefixes
+    lines = [{ "type" => "turn_context", "payload" => ctx }]
+    lines << { "type" => "response_item", "payload" => { "type" => "collab_tool_call" } } if collab
+    File.write(rollout, lines.map { |l| JSON.generate(l) }.join("\n"))
+    File.write(File.join(@dir, "codex.log"), log)
+    File.write(File.join(@dir, "events.jsonl"), JSON.generate({ "type" => "turn.completed", "usage" => { "input_tokens" => 5, "output_tokens" => 2 } }))
+    requested = { "model" => "gpt-5.6-luna", "effort" => "low", "service_tier" => "default", "sandbox" => "read-only" }
+    CodexDelegate.summarize(role: "wf-explorer", requested: requested, resolved: requested.dup,
+                            events: File.join(@dir, "events.jsonl"), log: File.join(@dir, "codex.log"),
+                            rollout: rollout, exit_status: exit_status, wall: 1.0, last_message: "m")
+  end
+
+  def test_matching_observation_verifies_isolation
+    r = fixture_run(log: LOG_DEFAULT)
+    assert r["isolation_verified"], r["isolation_failures"].inspect
+    assert_equal "gpt-5.6-luna", r["evidence_model"]
+    assert r["evidence_usable_for_requested"]
+    assert_equal 5, r["usage"]["input_tokens"]
+  end
+
+  def test_leaked_priority_tier_fails_isolation
+    r = fixture_run(log: LOG_PRIORITY)
+    refute r["isolation_verified"]
+    assert_includes r["isolation_failures"], "service_tier mismatch"
+  end
+
+  def test_leaked_sandbox_fails_isolation
+    r = fixture_run(log: LOG_DEFAULT, sandbox: "workspace-write")
+    refute r["isolation_verified"]
+    assert_includes r["isolation_failures"], "sandbox mismatch"
+  end
+
+  def test_nested_agent_call_fails_isolation
+    r = fixture_run(log: LOG_DEFAULT, collab: true)
+    refute r["isolation_verified"]
+    assert_includes r["isolation_failures"], "nested agent call observed"
+  end
+
+  def test_loaded_execpolicy_prefixes_fail_isolation
+    r = fixture_run(log: LOG_DEFAULT, prefixes: [["herdr", "agent", "start"]])
+    refute r["isolation_verified"]
+    assert(r["isolation_failures"].any? { |f| f.include?("execpolicy") })
+    assert_equal [["herdr", "agent", "start"]], r["approved_command_prefixes"]
+  end
+
+  def test_session_tier_is_read_from_its_own_line
+    log = "INFO codex_exec: SessionConfiguredEvent { model: \"m\", approval_policy: Never }\n" \
+          "INFO other: something service_tier: Some(\"priority\")\n" +
+          LOG_DEFAULT.lines.drop(1).join
+    assert_nil CodexDelegate.observe_tier(log)["session"]
+  end
+
+  def test_unobserved_tier_is_not_verified
+    r = fixture_run(log: "")
+    refute r["isolation_verified"]
+    assert_includes r["isolation_failures"], "service_tier unobserved"
+  end
+end
+
+class AccountingTest < Minitest::Test
+  REQ = { "model" => "claude-sonnet-5", "effort" => "medium" }.freeze
+
+  def test_observed_model_differs_attributes_evidence_to_what_ran
+    r = RoutingSupport.account(requested: REQ, resolved: REQ, observed: { "model" => "claude-sonnet-5-5", "effort" => "medium" })
+    assert_equal "claude-sonnet-5-5", r["evidence_model"]
+    refute r["evidence_usable_for_requested"]
+    assert r["mismatches"].key?("model")
+    assert(r["warnings"].any? { |w| w.include?("observed claude-sonnet-5-5") })
+  end
+
+  def test_matching_run_is_usable_evidence
+    r = RoutingSupport.account(requested: REQ, resolved: REQ, observed: REQ.dup)
+    assert r["evidence_usable_for_requested"]
+    assert_empty r["warnings"]
+  end
+
+  def test_unobserved_fields_are_warned_not_assumed
+    r = RoutingSupport.account(requested: REQ, resolved: REQ, observed: { "model" => "claude-sonnet-5" })
+    assert(r["warnings"].any? { |w| w.include?("effort not observed") })
+  end
+
+  def test_resolver_fallback_is_recorded
+    r = RoutingSupport.account(requested: REQ, resolved: { "model" => "claude-opus-5-5", "effort" => "medium" },
+                               observed: { "model" => "claude-opus-5-5", "effort" => "medium" })
+    assert(r["warnings"].any? { |w| w.include?("resolver changed model") })
+    refute r["evidence_usable_for_requested"]
+    assert_equal "claude-opus-5-5", r["evidence_model"]
+  end
+end

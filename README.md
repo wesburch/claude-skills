@@ -21,8 +21,10 @@ Global skills are custom commands (invoked with `/skill-name`) that extend Claud
    ~/claude-skills/scripts/install.sh
    ```
    This symlinks every skill directory (one with a `SKILL.md`) into
-   `~/.claude/skills/` and `~/.codex/skills/`, and every file in `commands/`
-   into `~/.claude/commands/`. It's idempotent and non-destructive — safe to
+   `~/.claude/skills/` and `~/.codex/skills/`, every file in `commands/`
+   into `~/.claude/commands/`, and the engineering-workflow delegate roles in
+   `agents/` into `~/.claude/agents/` and `~/.codex/agents/`
+   (`install.sh --dry-run` lists changes first). It's idempotent and non-destructive — safe to
    rerun any time (e.g. after `git pull` or adding a new skill). It never
    overwrites a real file or directory; if something else already occupies a
    target path, it's reported as a conflict for you to resolve by hand
@@ -160,6 +162,36 @@ category `index.md` maps must be updated on write.
 **Setup per client:** drop a `brand.json` in the project repo's `.claude/` folder. See [`briefme/brand.example.json`](./briefme/brand.example.json) for the schema.
 
 [Full documentation](./briefme/SKILL.md)
+
+---
+
+### `engineering-workflow` model routing
+
+Routing policy names capability classes and effort tiers
+(`engineering-workflow/references/routing.md`); concrete models are data in
+`engineering-workflow/registry/models.yaml`. Four reusable delegate roles in
+`agents/` (`wf-explorer`, `wf-implementer`, `wf-reviewer`, `wf-reviewer-deep`)
+set their own model, effort, tools and service tier so delegates never inherit
+the interactive session's settings.
+
+```bash
+engineering-workflow/scripts/model-routing check                      # registry drift warns; install/isolation errors fail
+engineering-workflow/scripts/model-routing resolve --role wf-reviewer # what a delegate would run
+engineering-workflow/scripts/codex-delegate --role wf-explorer --cwd . --packet p.md  # isolated headless Codex delegate
+engineering-workflow/scripts/runtime-smoke-test                       # live, small paid check of delegate isolation
+engineering-workflow/scripts/test-model-routing                       # deterministic tests (also test-codex-delegate,
+                                                                      #   test-readonly-bash-guard)
+```
+
+Claude roles install as symlinks; Codex roles install as real copies because
+Codex does not load symlinked agent files. Read-only Claude roles enforce
+read-only Bash with a fail-closed `PreToolUse` guard. Codex workflow delegates
+run as separate headless processes (`codex-delegate`), so a Fast/priority or
+permissive parent session never reaches them.
+
+When a model ships or retires, edit the registry (new models enter as
+`candidate`), keep `agents/` in sync with its `roles`, and rerun the check.
+`doctor.sh` includes the check as warnings.
 
 ---
 

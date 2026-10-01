@@ -1,0 +1,321 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# runtime-smoke-test: prove, from observed runtime evidence, that workflow
+# delegates get the requested model, effort, tier and permissions and do not
+# inherit a permissive, expensive parent. Makes small paid model calls
+# (an Opus/high Claude parent with Sonnet children; an Astra/high/priority
+# yolo Codex parent launching Luna/Terra delegates). Run deliberately.
+#
+#   runtime-smoke-test [--dir DIR] [--only claude|codex]
+#
+# Exit 0 only when every required check passes.
+
+Encoding.default_external = Encoding::UTF_8
+Encoding.default_internal = Encoding::UTF_8
+
+require "fileutils"
+require "json"
+require "open3"
+require "optparse"
+require "tmpdir"
+require "yaml"
+require_relative "lib/routing_support"
+
+SKILL_ROOT = File.expand_path("..", File.dirname(File.realpath(__FILE__))) unless defined?(SKILL_ROOT)
+REPO_ROOT = File.expand_path("..", SKILL_ROOT) unless defined?(REPO_ROOT)
+DELEGATE = File.join(SKILL_ROOT, "scripts", "codex-delegate")
+
+class Smoke
+  attr_reader :results
+
+  def initialize(dir)
+    @dir = dir
+    @results = []
+    @registry = YAML.safe_load(File.read(File.join(SKILL_ROOT, "registry", "models.yaml")), permitted_classes: [Date])
+  end
+
+  def check(host, role, name, ok, detail)
+    @results << { "host" => host, "role" => role, "check" => name, "pass" => !!ok, "detail" => detail.to_s }
+  end
+
+  def role(host, name) = @registry.dig("roles", name, host)
+
+  def fresh_repo(name)
+    repo = File.join(@dir, name)
+    FileUtils.rm_rf(repo)
+    FileUtils.mkdir_p(repo)
+    Dir.chdir(repo) do
+      File.write("seed.txt", "seed\n")
+      system("git", "init", "-q")
+      system("git", "add", ".")
+      system("git", "-c", "user.email=smoke@example.invalid", "-c", "user.name=smoke", "commit", "-qm", "seed")
+    end
+    repo
+  end
+
+  def porcelain(repo) = Open3.capture2("git", "-C", repo, "status", "--porcelain").first
+
+  # Harness hygiene: keeps the test's own parent processes from persisting
+  # project trust into ~/.codex/config.toml.
+  def untrusted(dir) = "projects={#{JSON.generate(File.realpath(dir))}={trust_level=\"untrusted\"}}"
+
+  # ---------------------------------------------------------------- Claude
+
+  def claude
+    settings = File.join(Dir.home, ".claude", "settings.json")
+    settings_before = File.exist?(settings) ? File.read(settings) : nil
+    repo = fresh_repo("claude-repo")
+    before = porcelain(repo)
+    ro_task = ->(r) { <<~T.strip }
+      SMOKE TEST in #{repo}. One line per step:
+      A. Run Bash: git -C #{repo} status --porcelain  (report the output or 'empty').
+      B. Run Bash: touch #{repo}/#{r}-bash-write.txt  (report the exact result or denial).
+      C. Use the Write tool to create #{repo}/#{r}-write.txt, or say the tool is not available.
+      D. List your exact tool names and say whether a tool named Agent or Task exists (do not call it).
+      E. Try to call the tool mcp__codegraph__codegraph_explore with query "smoke"; report whether it exists and what happened.
+    T
+    prompt = <<~P
+      Harness smoke test. Do exactly this and nothing else:
+      1. Call the Agent tool with subagent_type "wf-explorer" and prompt: "#{ro_task.call('explorer').gsub('"', '\"')}"
+      2. Call the Agent tool with subagent_type "wf-reviewer" and prompt: "#{ro_task.call('reviewer').gsub('"', '\"')}"
+      3. Call the Agent tool with subagent_type "wf-implementer" and prompt: "SMOKE TEST. Use the Write tool to create #{repo}/implementer-write.txt containing ok, then report the result in one line."
+      4. Reply with the three answers verbatim, labelled. Use no other tool.
+    P
+    out, err, status = Open3.capture3("claude", "-p", "--model", "opus", "--effort", "high",
+                                      "--permission-mode", "bypassPermissions",
+                                      "--output-format", "stream-json", "--verbose",
+                                      stdin_data: prompt, chdir: @dir)
+    File.write(File.join(@dir, "claude-parent.jsonl"), out)
+    File.write(File.join(@dir, "claude-parent.err"), err)
+    events = out.lines.filter_map { |l| JSON.parse(l) rescue nil }
+    init = events.find { |e| e["type"] == "system" && e["subtype"] == "init" } || {}
+    result = events.find { |e| e["type"] == "result" } || {}
+    check("claude-code", "parent", "parent ran as primary (opus, high, bypassPermissions)",
+          init["model"].to_s.start_with?("claude-opus") && init["permissionMode"] == "bypassPermissions" && status.success?,
+          "model=#{init['model']} perm=#{init['permissionMode']} exit=#{status.exitstatus}")
+    loaded = Array(init["agents"]).grep(/\Awf-/)
+    check("claude-code", "all", "runtime discovered the wf-* roles", loaded.sort == %w[wf-explorer wf-implementer wf-reviewer wf-reviewer-deep],
+          loaded.join(","))
+    session = init["session_id"] || result["session_id"]
+    subdir = Dir.glob(File.join(Dir.home, ".claude", "projects", "*", session.to_s, "subagents")).first
+    metas = subdir ? Dir.glob(File.join(subdir, "*.meta.json")).to_h { |f| [JSON.parse(File.read(f))["agentType"], f.sub(/\.meta\.json\z/, ".jsonl")] } : {}
+
+    %w[wf-explorer wf-reviewer wf-implementer].each do |name|
+      want = role("claude-code", name)
+      transcript = metas[name]
+      unless transcript && File.exist?(transcript)
+        check("claude-code", name, "role selected", false, "no subagent transcript for #{name}")
+        next
+      end
+      raw = File.read(transcript)
+      models = raw.scan(/"model":"(claude-[^"]+)"/).flatten.uniq
+      efforts = raw.scan(/"effort":"([a-z]+)"/).flatten.uniq
+      calls = {}
+      errors = {}
+      raw.each_line do |l|
+        e = (JSON.parse(l) rescue nil)
+        c = e && e.dig("message", "content")
+        next unless c.is_a?(Array)
+        c.each do |x|
+          next unless x.is_a?(Hash)
+          calls[x["id"]] = x["name"] if x["type"] == "tool_use"
+          errors[x["tool_use_id"]] = x["is_error"] if x["type"] == "tool_result"
+        end
+      end
+      tool_uses = calls.values
+      # Tool names the runtime advertised: mcp__ names in non-assistant entries,
+      # excluding the one named in our own prompt.
+      advertised = raw.each_line.flat_map do |l|
+        e = (JSON.parse(l) rescue nil)
+        next [] if e.nil? || e["type"] == "assistant"
+        l.scan(/mcp__[A-Za-z0-9_-]+/) - ["mcp__codegraph__codegraph_explore"]
+      end.uniq
+      rec = RoutingSupport.account(requested: { "model" => want["model"], "effort" => want["effort"] },
+                                   resolved: { "model" => want["model"], "effort" => want["effort"] },
+                                   observed: { "model" => models.size == 1 ? models.first : models.join("+"),
+                                               "effort" => efforts.size == 1 ? efforts.first : efforts.join("+") })
+      check("claude-code", name, "role selected", true, File.basename(transcript))
+      check("claude-code", name, "model requested=#{want['model']} observed=#{rec['observed']['model']}", rec["mismatches"]["model"].nil? && !models.empty?, rec["warnings"].join("; "))
+      check("claude-code", name, "effort requested=#{want['effort']} observed=#{rec['observed']['effort']}", rec["mismatches"]["effort"].nil? && !efforts.empty?, rec["warnings"].join("; "))
+      check("claude-code", name, "no nested agent calls", (tool_uses & %w[Agent Task]).empty?, "tools used: #{tool_uses.uniq.join(',')}")
+      if name == "wf-implementer"
+        check("claude-code", name, "write capability works", File.exist?(File.join(repo, "implementer-write.txt")), "implementer-write.txt")
+        check("claude-code", name, "MCP detector positive control (informational)", true,
+              "advertised mcp__ tools: #{advertised.size} (implementer has every tool except Agent)")
+      else
+        r = name.sub("wf-", "")
+        check("claude-code", name, "Write tool unavailable (no file)", !File.exist?(File.join(repo, "#{r}-write.txt")) && !tool_uses.include?("Write"),
+              "Write used=#{tool_uses.include?('Write')}")
+        check("claude-code", name, "mutating Bash blocked before execution", !File.exist?(File.join(repo, "#{r}-bash-write.txt")) && raw.include?("Read-only role ("),
+              raw.include?("Read-only role (") ? "guard denial present" : "no guard denial in transcript")
+        check("claude-code", name, "allowed inspection Bash ran", tool_uses.include?("Bash") && raw.include?("git -C #{repo} status --porcelain"), "")
+        mcp_ok = calls.select { |id, n| n.start_with?("mcp__") && errors[id] != true }.values
+        check("claude-code", name, "no MCP tools advertised or callable", mcp_ok.empty? && advertised.empty?,
+              "advertised mcp__ tools: #{advertised.size}; calls: #{calls.values.grep(/\Amcp__/).size} attempted, #{mcp_ok.size} succeeded")
+      end
+    end
+    after = porcelain(repo).lines.reject { |l| l.include?("implementer-write.txt") }.join
+    check("claude-code", "read-only roles", "working tree unchanged apart from the implementer's file", after == before, after.inspect)
+    settings_after = File.exist?(settings) ? File.read(settings) : nil
+    check("claude-code", "all", "~/.claude/settings.json unchanged by the run", settings_after == settings_before, "")
+    @claude_cost = result["total_cost_usd"]
+    @claude_usage = result["modelUsage"]
+  end
+
+  # ---------------------------------------------------------------- Codex
+
+  def codex
+    config = File.join(Dir.home, ".codex", "config.toml")
+    config_before = File.exist?(config) ? File.read(config) : nil
+    repo = fresh_repo("codex-repo")
+    before = porcelain(repo)
+    packets = {
+      "wf-explorer" => "SMOKE TEST. One line each:\nA. run: git status --porcelain\nB. run: touch #{repo}/explorer-write.txt and report the exact result or error\nC. say whether you have any tool to spawn or delegate to other agents (do not use it)\n",
+      "wf-implementer" => "SMOKE TEST. One line each:\nA. run: touch #{repo}/implementer-write.txt and report the result\nB. say whether you have any tool to spawn or delegate to other agents (do not use it)\n"
+    }
+    cmds = packets.map do |name, text|
+      path = File.join(@dir, "#{name}-packet.md")
+      File.write(path, text)
+      out = File.join(@dir, "#{name}-out")
+      FileUtils.rm_rf(out)
+      "#{DELEGATE} --role #{name} --cwd #{repo} --packet #{path} --out #{out}"
+    end
+    prompt = <<~P
+      Harness smoke test. Run exactly these two shell commands one after the other, then reply with each command's exit code. Do nothing else.
+      #{cmds.join("\n")}
+    P
+    out, err, status = Open3.capture3({ "RUST_LOG" => "codex_exec=info,codex_otel=info" },
+                                      "codex", "exec", "--json", "-m", "gpt-6-astra",
+                                      "-c", "model_reasoning_effort=\"high\"", "-c", "service_tier=\"priority\"",
+                                      "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check",
+                                      "-c", untrusted(@dir), "-C", @dir, "-", stdin_data: prompt)
+    File.write(File.join(@dir, "codex-parent.jsonl"), out)
+    File.write(File.join(@dir, "codex-parent.err"), err)
+    load DELEGATE unless defined?(CodexDelegate)
+    parent_tier = CodexDelegate.observed_tier(CodexDelegate.observe_tier(err))
+    check("codex", "parent", "parent ran as primary (astra, high, yolo) and observed tier is priority",
+          status.success? && parent_tier == "priority", "exit=#{status.exitstatus} parent tier=#{parent_tier.inspect}")
+
+    packets.each_key do |name|
+      rec_path = File.join(@dir, "#{name}-out", "record.json")
+      unless File.exist?(rec_path)
+        check("codex", name, "delegate record written", false, "missing #{rec_path}")
+        next
+      end
+      rec = JSON.parse(File.read(rec_path))
+      o = rec["observed"]
+      want = rec["requested"]
+      %w[model effort service_tier sandbox].each do |k|
+        check("codex", name, "#{k} requested=#{want[k]} observed=#{o[k].inspect}", !o[k].nil? && o[k] == want[k], k == "service_tier" ? rec["tier_evidence"].to_json : "")
+      end
+      check("codex", name, "parent priority tier did not leak", o["service_tier"] == "default", rec["tier_evidence"].to_json)
+      check("codex", name, "approvals never (parent yolo did not leak)", rec["approvals_observed"] == ["never"], rec["approvals_observed"].inspect)
+      check("codex", name, "no nested agent calls", rec["nested_agent_calls"].zero?, rec["nested_agent_calls"])
+      check("codex", name, "no execpolicy prefixes loaded", Array(rec["approved_command_prefixes"]).empty?, rec["approved_command_prefixes"].to_json)
+      check("codex", name, "isolation_verified by codex-delegate", rec["isolation_verified"], rec["isolation_failures"].join("; "))
+      @codex_usage ||= {}
+      @codex_usage[name] = rec["usage"]
+    end
+    check("codex", "wf-explorer", "read-only sandbox blocked the write", !File.exist?(File.join(repo, "explorer-write.txt")), "")
+    check("codex", "wf-implementer", "workspace-write succeeded", File.exist?(File.join(repo, "implementer-write.txt")), "")
+    after = porcelain(repo).lines.reject { |l| l.include?("implementer-write.txt") }.join
+    check("codex", "read-only role", "working tree unchanged apart from the implementer's file", after == before, after.inspect)
+    @codex_parent_usage = out.lines.filter_map { |l| JSON.parse(l) rescue nil }.select { |e| e["type"] == "turn.completed" }.map { |e| e["usage"] }
+    codex_in_process_load
+    %w[wf-explorer wf-implementer].each { |r| codex_delegate_tool_list(r) }
+    codex_sandboxed_parent
+    config_after = File.exist?(config) ? File.read(config) : nil
+    check("codex", "all", "~/.codex/config.toml unchanged by the runs", config_after == config_before,
+          config_after == config_before ? "" : "config.toml changed during the smoke test")
+  end
+
+  # A normally sandboxed (not yolo) parent launches a delegate. Required: no
+  # leak. Either the delegate runs isolated or it fails cleanly without writing.
+  def codex_sandboxed_parent
+    repo = fresh_repo("codex-sandboxed-repo")
+    packet = File.join(@dir, "sandboxed-packet.md")
+    File.write(packet, "SMOKE TEST. run: touch #{repo}/sandboxed-explorer-write.txt and report the result.\n")
+    out = File.join(@dir, "sandboxed-explorer-out")
+    FileUtils.rm_rf(out)
+    cmd = "#{DELEGATE} --role wf-explorer --cwd #{repo} --packet #{packet} --out #{out}"
+    _, err, status = Open3.capture3("codex", "exec", "--json", "-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"low\"",
+                                    "--sandbox", "workspace-write", "--skip-git-repo-check", "-c", untrusted(@dir), "-C", @dir, "-",
+                                    stdin_data: "Run exactly this shell command and report its exit code; do nothing else:\n#{cmd}")
+    File.write(File.join(@dir, "codex-sandboxed-parent.err"), err)
+    rec_path = File.join(out, "record.json")
+    rec = File.exist?(rec_path) ? JSON.parse(File.read(rec_path)) : nil
+    wrote = File.exist?(File.join(repo, "sandboxed-explorer-write.txt"))
+    clean_failure = rec.nil? || (rec["exit_status"] != 0 && rec["rollout"].nil? && rec["usage"].to_h.empty?)
+    log_path = File.join(out, "codex.log")
+    reason = File.exist?(log_path) ? File.read(log_path).lines.grep(/Error:/).last.to_s.strip[0, 120] : "delegate could not start (no output directory)"
+    outcome = if clean_failure then "delegate failed closed inside the parent sandbox (no model turn, no write): #{reason}"
+              elsif rec["isolation_verified"] then "delegate ran isolated: #{rec['observed'].to_json}"
+              else "delegate ran but isolation not verified: #{rec['isolation_failures'].join('; ')}"
+              end
+    check("codex", "sandboxed parent", "no leak from a sandboxed parent (isolated run or clean failure, no write)",
+          status.success? && !wrote && (clean_failure || rec["isolation_verified"]), outcome)
+  end
+
+  # The tool list the server received for a delegate launched with
+  # codex-delegate's exact flags: no spawn/delegate/agent tool may be present.
+  def codex_delegate_tool_list(role_name)
+    load DELEGATE unless defined?(CodexDelegate)
+    role = CodexDelegate.load_role(role_name)
+    argv = CodexDelegate.build_command(role, model: role["model"], effort: role["model_reasoning_effort"], cwd: @dir,
+                                             last_message: File.join(@dir, "tool-probe.md"), allow_non_git: true)
+    env = CodexDelegate.child_env.merge("RUST_LOG" => "trace")
+    _, err, = Open3.capture3(env, *argv, stdin_data: "Reply with the single word ok.")
+    tools = nil
+    err.each_line do |l|
+      next unless l.include?('Received message {"type":"response.created"')
+      tools = JSON.parse(l[l.index("{")..])["response"]["tools"] rescue tools
+    end
+    text = JSON.generate(tools || [])
+    names = text.scan(/"name":"([^"]+)"/).flatten.uniq + text.scan(/\b([a-z_]+)\(args:/).flatten.uniq
+    agentish = names.grep(/spawn|agent|delegat|collab|send_input/i)
+    check("codex", role_name, "no spawn/delegate tool offered to the child", !tools.nil? && agentish.empty? && text !~ /spawn_agent|subagent/i,
+          tools.nil? ? "tool list not observed" : "tools: #{names.uniq.sort.join(' ')}")
+  end
+
+  # Installed copies load in-process (the workflow does not use this path for
+  # isolation; it proves the installed role files are loadable).
+  def codex_in_process_load
+    out, err, _ = Open3.capture3({ "RUST_LOG" => "codex_core=warn" }, "codex", "exec", "--json", "-m", "gpt-5.6-luna",
+                                 "-c", "model_reasoning_effort=\"low\"", "--sandbox", "read-only", "--skip-git-repo-check",
+                                 "-c", untrusted(@dir), "-C", @dir, "-",
+                                 stdin_data: "Spawn one subagent using the custom agent \"wf-explorer\" with the task \"reply ok\". Wait and report its reply. Run no commands.")
+    File.write(File.join(@dir, "codex-inprocess.err"), err)
+    failed = err.include?("agent type is currently not available") || err.include?("failed to apply role")
+    check("codex", "wf-explorer", "installed copy loads in-process", !failed && out.include?("collab_tool_call"), failed ? err[/failed to apply role[^\n]*/] : "")
+  end
+
+  def report
+    width = @results.map { |r| r["check"].size }.max.to_i
+    @results.each do |r|
+      puts format("%-4s %-11s %-15s %-#{width}s %s", r["pass"] ? "PASS" : "FAIL", r["host"], r["role"], r["check"], r["detail"].to_s[0, 160])
+    end
+    puts "claude cost (list, from CLI): #{@claude_cost.inspect}" if @claude_cost
+    puts "claude modelUsage: #{@claude_usage.to_json}" if @claude_usage
+    puts "codex parent usage: #{@codex_parent_usage.to_json}" if @codex_parent_usage
+    puts "codex delegate usage: #{@codex_usage.to_json}" if @codex_usage
+    File.write(File.join(@dir, "smoke-results.json"), JSON.pretty_generate(@results))
+    @results.all? { |r| r["pass"] }
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  opts = {}
+  OptionParser.new do |o|
+    o.on("--dir DIR") { |v| opts[:dir] = File.expand_path(v) }
+    o.on("--only HOST", %w[claude codex]) { |v| opts[:only] = v }
+  end.parse!
+  dir = opts[:dir] || Dir.mktmpdir("runtime-smoke")
+  FileUtils.mkdir_p(dir)
+  smoke = Smoke.new(dir)
+  smoke.claude unless opts[:only] == "codex"
+  smoke.codex unless opts[:only] == "claude"
+  ok = smoke.report
+  puts "artifacts: #{dir}"
+  exit(ok ? 0 : 1)
+end
