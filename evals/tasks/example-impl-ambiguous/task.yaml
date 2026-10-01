@@ -1,0 +1,26 @@
+id: example-impl-ambiguous
+category: implementation-ambiguous
+title: Add a cleanup script whose requirement R1 is ambiguous (built-in example)
+# A self-contained example of the impl_spec grader: variant A of a
+# specification-sensitivity family. Its hidden data is public on purpose, so
+# it measures nothing; it exercises the harness and shows the format. Real
+# variants live in a private evidence store (see evals/README.md).
+fixture: fixture
+scope: [.]
+workspace_tree: 2f555a87875663d0d38a9099cee426b124587123  # tree of the base commit built from fixture/; checked every trial
+role: wf-implementer
+access: workspace-write
+owned_files: [scripts/clean-tmp.sh]
+packet: packet.md
+grader: impl_spec
+task_family: example-impl
+# Specification-sensitivity fields (never shown to the model). `experiment`
+# keeps these runs out of promotion evidence; `variable_section` names the
+# only packet lines allowed to differ between variants of one family.
+experiment: example
+variant: A
+variable_section: { start: "Requirements:", end: "Owned files:" }
+# Isolation policy (read by lib/isolation_audit.rb, never shown to the model).
+eval_policy:
+  scratch_writes: true
+  cwd_independence: true

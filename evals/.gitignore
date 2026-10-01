@@ -4,10 +4,12 @@
 /results/
 # Local, machine-specific configuration (for example `store: <path>`).
 /config.local.yaml
-# Only the built-in example task and the generic comparison tool are public.
+# Only the built-in example tasks and the generic comparison tool are public.
 /tasks/*
 !/tasks/example-review/
+!/tasks/example-impl-ambiguous/
 /hidden/*
 !/hidden/example-review/
+!/hidden/example-impl-ambiguous/
 /analysis/*
 !/analysis/compare.rb

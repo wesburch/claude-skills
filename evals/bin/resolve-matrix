@@ -1,0 +1,42 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# evals/bin/resolve-matrix SPEC.yaml [--out MANIFEST.json]
+#
+# Resolves a matrix spec (roles, hosts, effort tiers, incumbent or
+# candidates) into concrete configurations through the model registry's
+# resolver, and prints or writes the manifest that analysis/compare.rb and a
+# run driver read. Records the registry revision; skipped configurations are
+# listed with the reason. Runs no model and never edits the registry.
+# Relative SPEC and --out paths are looked up like other evaluation data
+# (this checkout, then the attached store); absolute paths are used as given.
+
+require_relative "../lib/matrix"
+require "optparse"
+
+opts = {}
+OptionParser.new do |o|
+  o.banner = "usage: evals/bin/resolve-matrix SPEC.yaml [--out MANIFEST.json]"
+  o.on("--out FILE") { |v| opts[:out] = v }
+end.parse!
+abort "usage: evals/bin/resolve-matrix SPEC.yaml [--out MANIFEST.json]" unless ARGV.size == 1
+locate = ->(p) { p.start_with?("/") ? p : Evals.data_path(p) }
+
+begin
+  spec = YAML.safe_load(File.read(locate.call(ARGV[0])))
+  manifest = Evals::Matrix.resolve(spec)
+rescue Evals::Error, Errno::ENOENT => e
+  warn "evals/bin/resolve-matrix: #{e.message}"
+  exit 2
+end
+json = JSON.pretty_generate(manifest)
+if opts[:out]
+  path = locate.call(opts[:out])
+  File.write(path, json + "\n")
+  warn "wrote #{path}"
+else
+  puts json
+end
+manifest["skipped"].each { |s| warn "skipped #{s['config'].values_at('role', 'host', 'tier', 'select').join('/')} #{s['model']}: #{s['reason']}" }
+warn "#{manifest['configs'].size} configuration(s) x #{manifest['trials']} trial(s); registry #{manifest.dig('registry', 'last_commit').to_s[0, 7]}" \
+     "#{manifest.dig('registry', 'uncommitted_changes') ? ' (uncommitted changes)' : ''}"

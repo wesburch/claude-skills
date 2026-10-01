@@ -104,14 +104,18 @@ module Evals
   # ---------------------------------------------------------------- frozen tasks
 
   # A task that declares `task_version` is frozen: it may not run or be
-  # regraded unless analysis/<task_family>-freeze-v<task_version>.json
-  # exists and every input it lists still has its recorded hash. Returns
-  # what is wrong; empty when the task is not frozen or everything matches.
+  # regraded unless analysis/<freeze name>-freeze-v<task_version>.json
+  # exists and every input it lists still has its recorded hash. The freeze
+  # name is `freeze_name`, else the task family, else the task id, so a
+  # family can hold tasks frozen separately (a historical task and later
+  # variants of it). Returns what is wrong; empty when the task is not
+  # frozen or everything matches.
+  def freeze_file(task) = "analysis/#{task['freeze_name'] || task['task_family'] || task.id}-freeze-v#{task['task_version']}.json"
+
   def frozen_mismatches(task, root: nil)
     roots = root ? [root] : data_roots
     return [] unless task["task_version"]
-    family = task["task_family"] || task.id
-    file = data_path("analysis/#{family}-freeze-v#{task['task_version']}.json", roots: roots)
+    file = data_path(freeze_file(task), roots: roots)
     return ["#{File.basename(file)} is missing"] unless File.file?(file)
     Hash(JSON.parse(File.read(file))["sha256"]).filter_map do |rel, want|
       full = data_path(rel, roots: roots)
@@ -463,6 +467,7 @@ module Evals
   def grader_fingerprint(task)
     files = { "graders.rb" => File.join(__dir__, "graders.rb"), "isolation_audit.rb" => File.join(__dir__, "isolation_audit.rb"),
               "task.yaml" => File.join(task.dir, "task.yaml") }
+    files["spec_graders.rb"] = File.join(__dir__, "spec_graders.rb") if task["grader"] == "impl_spec"
     Dir.glob(File.join(task.hidden_dir, "*")).each { |f| files["hidden/#{File.basename(f)}"] = f }
     files.transform_values { |p| File.file?(p) ? Digest::SHA256.file(p).hexdigest[0, 16] : nil }
   end
@@ -474,6 +479,7 @@ module Evals
               "guard" => guard_path, "codex-delegate" => File.join(SCRIPTS, "codex-delegate"),
               "eval_support.rb" => __FILE__, "graders.rb" => File.join(__dir__, "graders.rb"),
               "isolation_audit.rb" => File.join(__dir__, "isolation_audit.rb") }
+    files["spec_graders.rb"] = File.join(__dir__, "spec_graders.rb") if task["grader"] == "impl_spec"
     Dir.glob(File.join(task.hidden_dir, "*")).each { |f| files["hidden/#{File.basename(f)}"] = f }
     { "git_sha" => (Open3.capture2("git", "-C", REPO, "rev-parse", "HEAD").first.strip rescue nil),
       "dirty" => !(Open3.capture2("git", "-C", REPO, "status", "--porcelain", "--", ".", ":!evals/results").first.strip.empty? rescue true),

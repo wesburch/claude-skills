@@ -47,6 +47,7 @@ module Evals
         {
           "task_id" => task, "host" => host, "model" => model, "effort" => effort, "suite_versions" => runs.map { |r| r["suite_version"] }.uniq.sort, "category" => runs.first["category"],
           "role" => runs.first["role"], "task_family" => runs.first["task_family"] || task,
+          "experiment" => runs.first["experiment"], "variant" => runs.first["variant"],
           "valid_trials" => runs.size, "passes" => passes, "pass_rate" => (passes.to_f / runs.size).round(3),
           "median_wall_seconds" => median(runs.map { |r| r["wall_seconds"] }),
           "median_tokens" => { "input" => median(runs.map { |r| r.dig("tokens", "input") }),
@@ -64,6 +65,8 @@ module Evals
           "incorrect_findings" => g.sum { |x| x["incorrect_findings"].to_i },
           "unclassified_findings" => g.sum { |x| x["unclassified_findings"].to_i },
           "verdicts_correct" => g.first&.key?("verdict_correct") ? g.count { |x| x["verdict_correct"] } : nil,
+          "behaviours" => g.first&.key?("behaviour") ? g.map { |x| x["behaviour"] }.tally : nil,
+          "outcomes" => g.first&.key?("outcome") ? g.map { |x| x["outcome"] }.tally : nil,
           "median_packet_est_tokens" => median(runs.map { |r| r.dig("cost_breakdown", "preparation", "per_task_delegation", "packet", "est_tokens") }),
           "median_reply_est_tokens" => median(runs.map { |r| r.dig("cost_breakdown", "host_verification", "reply", "est_tokens") }),
           "mechanical_duplicates" => g.sum { |x| x["mechanical_duplicates"].to_i },
@@ -84,10 +87,15 @@ module Evals
 
     def invalid_reasons(r) = Evals.invalid_reasons(r)
 
+    # Experiment tasks (`experiment` in task.yaml) measure something other
+    # than a role's ordinary pass rate, so their runs never count as promotion
+    # evidence on their own; importing any of them is an explicit later decision.
+    def ordinary(groups) = groups.reject { |g| g["experiment"] }
+
     # LOCAL_EVAL evidence entries in the registry's local_eval schema. Written
     # to an artifact for review; never into registry/models.yaml.
     def local_eval_entries(groups)
-      groups.map do |g|
+      ordinary(groups).map do |g|
         { "tag" => "LOCAL_EVAL", "model" => g["model"], "category" => g["category"], "task_id" => g["task_id"], "host" => g["host"],
           "effort" => g["effort"], "date" => Time.now.utc.strftime("%Y-%m-%d"), "sample_size" => g["valid_trials"],
           "pass_rate" => g["pass_rate"], "median_cost_usd" => g["median_cost_usd"], "cost_per_success_usd" => g["cost_per_success_usd"],
@@ -104,7 +112,7 @@ module Evals
     # task_family count once. Below the minimum a result is preliminary.
     def promotion_readiness(groups)
       bar = Evals.config["promotion"]
-      groups.group_by { |g| g.values_at("role", "host", "model", "effort") }.map do |(role, host, model, effort), gs|
+      ordinary(groups).group_by { |g| g.values_at("role", "host", "model", "effort") }.map do |(role, host, model, effort), gs|
         samples = gs.sum { |g| g["valid_trials"] }
         families = gs.map { |g| g["task_family"] || g["task_id"] }.uniq.sort
         met = samples >= bar["min_valid_samples"] && families.size >= bar["min_distinct_tasks"]
@@ -124,6 +132,7 @@ module Evals
       c = groups.find { |g| g["task_id"] == task_id && "#{g['model']}@#{g['effort']}" == candidate }
       r = groups.find { |g| g["task_id"] == task_id && "#{g['model']}@#{g['effort']}" == reference }
       return "insufficient evidence: no valid runs for #{[c ? nil : candidate, r ? nil : reference].compact.join(' and ')}" unless c && r
+      return "not applicable: #{task_id} belongs to experiment #{c['experiment'].inspect}, which is not promotion evidence" if c["experiment"]
       min = bar["min_valid_trials"]
       return "insufficient evidence: need #{min} valid trials each (have #{c['valid_trials']} and #{r['valid_trials']})" if [c, r].any? { |g| g["valid_trials"] < min }
       gate_loops = Array(Evals.config["repair_loop_gate_categories"]).include?(c["category"])
@@ -139,6 +148,24 @@ module Evals
       elsif cheaper then "consider promotion (recommendation only): #{candidate} clears the bar at lower cost per success than #{reference}"
       else "clears the bar but is not cheaper per success than #{reference}"
       end
+    end
+
+    # Specification-sensitivity view of experiment tasks: one row per
+    # experiment, variant, host, model and effort, pooled over task families
+    # (each family is one base task), with the behaviour classes counted.
+    def sensitivity(groups)
+      groups.select { |g| g["experiment"] }.group_by { |g| g.values_at("experiment", "variant", "host", "model", "effort") }
+            .map do |(experiment, variant, host, model, effort), gs|
+        n = gs.sum { |g| g["valid_trials"] }
+        passes = gs.sum { |g| g["passes"] }
+        sum_tally = ->(k) { gs.map { |g| g[k] || {} }.reduce({}) { |a, b| a.merge(b) { |_, x, y| x + y } } }
+        { "experiment" => experiment, "variant" => variant, "host" => host, "model" => model, "effort" => effort,
+          "families" => gs.map { |g| g["task_family"] }.uniq.sort, "tasks" => gs.map { |g| g["task_id"] }.sort,
+          "valid_trials" => n, "passes" => passes, "pass_rate" => n.positive? ? (passes.to_f / n).round(3) : nil,
+          "behaviours" => sum_tally.call("behaviours"), "outcomes" => sum_tally.call("outcomes"),
+          "unclassified" => sum_tally.call("outcomes")["unclassified"].to_i,
+          "median_of_task_median_cost_usd" => median(gs.map { |g| g["median_cost_usd"] }) }
+      end.sort_by { |x| x.values_at("experiment", "variant", "host", "model", "effort").map(&:to_s) }
     end
   end
 end

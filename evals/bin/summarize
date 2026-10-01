@@ -50,17 +50,32 @@ unless excluded.empty?
   puts "Excluded from model evidence (attributed to the model that ran):"
   excluded.each { |e| puts "  #{e['run_id']}: attributed to #{e['attributed_to']}; #{e['reasons'].join('; ')}" }
 end
+sensitivity = Evals::Summary.sensitivity(groups)
+unless sensitivity.empty?
+  puts
+  puts "Experiment tasks (not promotion evidence), pooled over task families:"
+  puts format("  %-18s %-3s %-11s %-18s %-7s %3s %5s %s", "experiment", "var", "host", "model", "effort", "n", "pass", "behaviours")
+  sensitivity.each do |x|
+    puts format("  %-18s %-3s %-11s %-18s %-7s %3d %5s %s", x["experiment"], x["variant"], x["host"], x["model"], x["effort"], x["valid_trials"],
+                x["pass_rate"].inspect, x["behaviours"].map { |k, v| "#{k}=#{v}" }.join(" "))
+  end
+  pending = records.select { |r| r["valid_for_model_evidence"] && r.dig("grader", "outcome") == "unclassified" }
+  unless pending.empty?
+    puts "  Unclassified behaviour (rule on it in hidden/<task>/adjudications.yaml before counting):"
+    pending.each { |r| puts "    #{r['run_id']}: #{r.dig('grader', 'unclassified_reason')}" }
+  end
+end
 readiness = Evals::Summary.promotion_readiness(groups)
 unless readiness.empty?
   puts
-  puts "Promotion minimum: #{readiness.first['needs']}, counted per model, effort and role. Below it a result is preliminary."
+  puts "Promotion minimum: #{readiness.first['needs']}, counted per model, effort and role, excluding experiment tasks. Below it a result is preliminary."
   readiness.sort_by { |x| x.values_at("role", "host", "model", "effort").map(&:to_s) }.each do |x|
     puts format("  %-15s %-11s %-18s %-7s %2d samples, %d task(s): %s", x["role"], x["host"], x["model"], x["effort"],
                 x["valid_samples"], x["distinct_tasks"], x["status"])
   end
 end
 FileUtils.mkdir_p(Evals.results_dir)
-File.write(File.join(Evals.results_dir, "summary.json"), JSON.pretty_generate({ "groups" => groups, "promotion_readiness" => readiness, "excluded" => excluded }))
+File.write(File.join(Evals.results_dir, "summary.json"), JSON.pretty_generate({ "groups" => groups, "promotion_readiness" => readiness, "sensitivity" => sensitivity, "excluded" => excluded }))
 File.write(File.join(Evals.results_dir, "local_eval_evidence.jsonl"), Evals::Summary.local_eval_entries(groups).map { |e| JSON.generate(e) }.join("\n") + "\n")
 if opts[:candidate] && opts[:reference] && opts[:task]
   puts

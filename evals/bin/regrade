@@ -14,7 +14,7 @@
 # the record, the saved packet and the saved reply.
 
 require_relative "../lib/eval_support"
-require_relative "../lib/graders"
+require_relative "../lib/spec_graders" # loads lib/graders too
 
 dirs = ARGV.empty? ? Dir.glob(File.join(Evals.results_dir, "*", "*")).select { |d| File.exist?(File.join(d, "record.json")) } : ARGV
 dirs.sort.each do |dir|
@@ -72,6 +72,7 @@ dirs.sort.each do |dir|
   rec["contamination"] = Evals::IsolationAudit.contamination_summary(audit)
   rec["grading_version"] = Evals.config["grading_version"]
   rec["task_family"] = task["task_family"] || task.id
+  %w[experiment variant].each { |k| task[k] ? rec[k] = task[k] : rec.delete(k) }
   saved_packet = File.read(File.join(dir, "packet.md")) rescue task.packet_text
   rec["cost_breakdown"] = Evals.cost_breakdown(rec, task, packet: saved_packet, final: final)
   rec["invalid_reasons"] = Evals.invalid_reasons(rec)
@@ -79,7 +80,7 @@ dirs.sort.each do |dir|
   File.write(File.join(dir, "record.json"), JSON.pretty_generate(rec))
 
   g = rec["grader"]
-  metric = g.slice("recall", "precision", "tests_passed", "critical_recall", "incorrect_findings", "unclassified_findings").map { |k, v| "#{k}=#{v}" }.join(" ")
+  metric = g.slice("recall", "precision", "tests_passed", "critical_recall", "incorrect_findings", "unclassified_findings", "behaviour", "outcome").map { |k, v| "#{k}=#{v}" }.join(" ")
   before = history["previous_valid"] ? "valid" : "invalid(#{Array(history['previous_invalid_reasons']).join('; ')})"
   after = rec["valid_for_model_evidence"] ? "valid" : "invalid(#{rec['invalid_reasons'].join('; ')})"
   audit_s = audit ? %w[external_read external_write reference_exposure].map { |k| "#{k.sub('external_', '').sub('reference_', 'ref_')}=#{audit.dig(k, 'status')}" }.join(" ") +

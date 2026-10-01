@@ -60,7 +60,8 @@ configs = manifest["configs"].map do |c|
       "unmatched" => gr["unmatched_findings"], "mechanical_duplicates" => gr["mechanical_duplicates"],
       "finding_classes" => gr["finding_classes"], "defect_severity" => gr["defect_severity"],
       "blocking_non_defect" => gr["blocking_non_defect"]&.size,
-      "verdict" => gr["verdict"], "verdict_correct" => gr["verdict_correct"]
+      "verdict" => gr["verdict"], "verdict_correct" => gr["verdict_correct"],
+      "variant" => gr["variant"], "behaviour" => gr["behaviour"], "outcome" => gr["outcome"], "unclassified_reason" => gr["unclassified_reason"]
     }.compact
   end
   excluded = (attempted - valid).map do |r|
@@ -85,6 +86,9 @@ configs = manifest["configs"].map do |c|
     "finding_classes" => g.first&.key?("finding_classes") ? g.map { |x| x["finding_classes"] }.reduce { |a, b| a.merge(b) { |_, p, q| p + q } } : nil,
     "defect_severity_by_trial" => g.first&.key?("defect_severity") ? g.map { |x| x["defect_severity"] } : nil,
     "verdicts" => g.first&.key?("verdict") ? g.map { |x| x["verdict"] } : nil,
+    # impl_spec: one behaviour class and outcome per trial (pass, noncompliant, fail, unclassified).
+    "behaviours" => g.first&.key?("behaviour") ? g.map { |x| x["behaviour"] }.tally : nil,
+    "outcomes" => g.first&.key?("outcome") ? g.map { |x| x["outcome"] }.tally : nil,
     "blocking_non_defect" => g.first&.key?("blocking_non_defect") ? g.sum { |x| x["blocking_non_defect"].size } : nil,
     "median_delegate_wall_s" => median(valid.map { |r| r.dig("cost_breakdown", "delegate_execution", "wall_seconds") })&.round(1),
     "packet_est_tokens" => valid.map { |r| r.dig("cost_breakdown", "preparation", "per_task_delegation", "packet", "est_tokens") }.uniq,
@@ -141,5 +145,6 @@ configs.each do |c|
               "#{c['valid']}/#{c['attempted']}", c["pass_rate"].inspect, c["median_recall"].inspect, c["median_precision"].inspect,
               c["critical_misses_total"].inspect, c["median_wall_s"].inspect, c["median_cost_usd"].inspect, c["cost_per_success_usd"].inspect,
               c["cost_per_success_incl_excluded_usd"].inspect, "#{c['false_positive_count']}/#{c['mechanical_duplicates']}/#{c['repair_proxy'].inspect}" +
-              (c.dig("isolation", "unknown_read_runs").to_i + c.dig("isolation", "unknown_write_runs").to_i).then { |u| u.positive? ? " ISOLATION-UNKNOWN=#{u}" : "" })
+              (c.dig("isolation", "unknown_read_runs").to_i + c.dig("isolation", "unknown_write_runs").to_i).then { |u| u.positive? ? " ISOLATION-UNKNOWN=#{u}" : "" } +
+              (c["behaviours"] ? " #{c['behaviours'].map { |b, n| "#{b}=#{n}" }.join(' ')}" : ""))
 end

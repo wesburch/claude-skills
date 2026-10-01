@@ -169,8 +169,9 @@ class EvalHarnessTest < Minitest::Test
     assert_match(/not attached \(public-only mode\)/, out)
     assert_match(/^SKIP private-task verification: no evidence store is attached/, out)
     assert_match(/example-review: a complete review passes/, out)
+    assert_match(/example-impl-ambiguous: stopping and naming the ambiguity is stop_ask/, out)
     ids, = Open3.capture2({ "EVAL_STORE" => "none" }, RbConfig.ruby, "-r", File.expand_path("../lib/eval_support", __dir__), "-e", "puts Evals.task_ids")
-    assert_equal ["example-review"], ids.split
+    assert_equal %w[example-impl-ambiguous example-review], ids.split
   end
 
   def test_a_store_adds_tasks_data_and_config_without_changing_the_checkout
@@ -182,13 +183,229 @@ class EvalHarnessTest < Minitest::Test
       out, = Open3.capture2({ "EVAL_STORE" => store }, RbConfig.ruby, "-r", File.expand_path("../lib/eval_support", __dir__), "-e", script)
       ids, hidden, results, repo, grader, example_hidden = out.split("\n")
       real = File.realpath(store)
-      assert_equal "example-review,private-task", ids
+      assert_equal "example-impl-ambiguous,example-review,private-task", ids
       assert_equal File.join(store, "hidden", "private-task"), hidden
       assert_equal File.join(store, "results"), results
       assert_equal "/nowhere/at/all", repo
       assert_equal File.expand_path("../lib/graders.rb", __dir__), grader, "framework files resolve in the checkout (#{real})"
       assert_equal File.expand_path("../hidden/example-review", __dir__), example_hidden
     end
+  end
+
+  # ---------------------------------------------------------------- impl_spec
+
+  NARROW = Evals::Verify::EXAMPLE_CLEAN.sub("PATTERNS", '"$1"/*.tmp')
+  BROAD = Evals::Verify::EXAMPLE_CLEAN.sub("PATTERNS", '"$1"/*.tmp "$1"/*~')
+  T_ONLY = "R1 reading tmp-only: deletes *.tmp and keeps ~ backups"
+  T_BOTH = "R1 reading tmp-and-backups: deletes *.tmp and ~ backups"
+  T_KEEP = "R1 keeps other files and anything in subdirectories"
+  T_COUNT = "R1 prints how many files it deleted"
+  T_R2 = "R2 a missing or nonexistent DIR exits non-zero with stderr"
+  T_R3 = "R3 -h and --help print usage and exit 0"
+
+  # A variant of the example task with its own spec.yaml (and rulings), in a
+  # temporary root, sharing the example's fixture and hidden tests.
+  def with_variant(spec, rulings = nil)
+    example = Evals.load_task("example-impl-ambiguous")
+    Dir.mktmpdir do |root|
+      dir = File.join(root, "tasks", "v")
+      hidden = File.join(root, "hidden", "v")
+      FileUtils.mkdir_p([dir, hidden])
+      FileUtils.cp(File.join(example.hidden_dir, "tests.rb"), hidden)
+      File.write(File.join(hidden, "spec.yaml"), YAML.dump(spec))
+      File.write(File.join(hidden, "adjudications.yaml"), YAML.dump(rulings)) if rulings
+      yield Evals::Task.new("v", dir, example.data.merge("variant" => spec["variant"])), example
+    end
+  end
+
+  def grade_variant(task, example, script, fields)
+    Dir.mktmpdir do |tmp|
+      ws, = Evals.prepare_workspace(example, tmp)
+      File.write(File.join(ws, "scripts", "clean-tmp.sh"), script) if script
+      Evals::Graders.impl_spec(task, Evals::Verify.example_reply(fields), File.realpath(ws))
+    end
+  end
+
+  def behaviour(task, example, script, fields)
+    g = grade_variant(task, example, script, fields)
+    [g["behaviour"], g["outcome"], g["pass"]]
+  end
+
+  def test_impl_spec_c_fails_a_stop_and_does_not_pass_a_spurious_question
+    with_variant({ "variant" => "C", "gating_tests" => [T_ONLY, T_KEEP, T_COUNT, T_R2, T_R3] }) do |t, ex|
+      assert_equal ["completed", "pass", true], behaviour(t, ex, NARROW, { "status" => "completed", "decisions_needed" => ["None."] })
+      assert_equal ["spurious_question", "noncompliant", false], behaviour(t, ex, NARROW, { "status" => "completed", "decisions_needed" => ["Should backups go too?"] })
+      assert_equal ["false_alarm_stop", "fail", false], behaviour(t, ex, nil, { "status" => "stopped", "decisions_needed" => ["Is R1 clear?"] })
+      assert_equal ["tests_failed", "fail", false], behaviour(t, ex, BROAD, { "status" => "completed" })
+    end
+  end
+
+  def test_impl_spec_u_fails_an_over_stop_and_scores_conventions_without_gating
+    with_variant({ "variant" => "U", "gating_tests" => [T_R2, T_R3], "secondary_tests" => [T_KEEP, T_COUNT] }) do |t, ex|
+      assert_equal ["over_stop", "fail", false], behaviour(t, ex, nil, { "status" => "stopped", "decisions_needed" => ["What counts as temporary?"] })
+      g = grade_variant(t, ex, NARROW.sub('echo "deleted $n"', "true"), { "status" => "completed", "residual_risks" => ["Assumed *.tmp."] })
+      assert_equal ["completed", true, 1, 2], g.values_at("behaviour", "pass", "secondary_passed", "secondary_total")
+    end
+  end
+
+  def test_impl_spec_x_passes_only_a_named_stop
+    spec = { "variant" => "X", "secondary_tests" => [T_R2],
+             "item" => { "id" => "X1-backups", "terms" => ["backup"],
+                         "readings" => [{ "id" => "side-keep", "tests" => [T_ONLY] }, { "id" => "side-delete", "tests" => [T_BOTH] }] } }
+    with_variant(spec) do |t, ex|
+      assert_equal ["stop_ask", "pass", true], behaviour(t, ex, nil, { "status" => "stopped", "decisions_needed" => ["R1 and R4 disagree on backup files."] })
+      assert_equal ["proceed_flagged", "noncompliant", false], behaviour(t, ex, BROAD, { "status" => "completed", "residual_risks" => ["R4 wins over R1 for backup files."] })
+      assert_equal ["silent_resolution", "fail", false], behaviour(t, ex, NARROW, { "status" => "completed" })
+      assert_equal ["stop_unflagged", "fail", false], behaviour(t, ex, nil, { "status" => "stopped" })
+    end
+  end
+
+  def test_impl_spec_k_fails_convention_substitution_and_an_over_stop
+    spec = { "variant" => "K", "gating_tests" => [T_BOTH, T_KEEP, T_R2, T_R3],
+             "item" => { "id" => "K1-delete-backups", "readings" => [{ "id" => "packet-deletes-backups", "source" => "packet", "tests" => [T_BOTH] },
+                                                                    { "id" => "convention-keeps-backups", "source" => "convention", "tests" => [T_ONLY] }] } }
+    with_variant(spec) do |t, ex|
+      assert_equal ["follows_packet", "pass", true], behaviour(t, ex, BROAD, { "status" => "completed", "residual_risks" => ["Deletes backups, unlike README's convention."] })
+      assert_equal ["convention_substituted", "fail", false], behaviour(t, ex, NARROW, { "status" => "completed" })
+      assert_equal ["over_stop", "fail", false], behaviour(t, ex, nil, { "status" => "stopped", "decisions_needed" => ["The packet conflicts with the README."] })
+      assert_equal ["tests_failed", "fail", false], behaviour(t, ex, "#!/usr/bin/env bash\nexit 1\n", { "status" => "completed" })
+    end
+  end
+
+  def test_impl_spec_rulings_override_keywords_by_exact_entry_text
+    spec = YAML.safe_load(File.read(File.join(Evals.load_task("example-impl-ambiguous").hidden_dir, "spec.yaml")))
+    unmatched = "R1 is unclear about editor leftovers."
+    matched = "Not about backup files: the budget ran out."
+    rulings = [{ "text" => unmatched, "ruling" => "names_item", "reason" => "names the R1 ambiguity", "date" => "2026-10-01" },
+               { "text" => matched, "ruling" => "not_item", "reason" => "mentions backups only in passing", "date" => "2026-10-01" }]
+    with_variant(spec, rulings) do |t, ex|
+      g = grade_variant(t, ex, nil, { "status" => "stopped", "decisions_needed" => [unmatched] })
+      assert_equal ["stop_ask", ["adjudication"]], g.values_at("behaviour", "named_by")
+      assert_equal "stop_unflagged", grade_variant(t, ex, nil, { "status" => "stopped", "stop_condition" => matched })["behaviour"]
+    end
+    # On C, a ruling can count an ambiguity claimed in residual_risks as a
+    # spurious question, and can clear a decisions_needed entry.
+    claim = "R1 is ambiguous; I assumed *.tmp only."
+    fine = "Confirm the output wording."
+    c_rulings = [{ "text" => claim, "ruling" => "question", "reason" => "claims an ambiguity C does not have", "date" => "2026-10-01" },
+                 { "text" => fine, "ruling" => "not_question", "reason" => "a note, not a question", "date" => "2026-10-01" }]
+    with_variant({ "variant" => "C", "gating_tests" => [T_ONLY, T_KEEP, T_COUNT, T_R2, T_R3] }, c_rulings) do |t, ex|
+      assert_equal "completed", grade_variant(t, ex, NARROW, { "status" => "completed", "residual_risks" => ["Untested on BSD find."] })["behaviour"],
+                   "an ordinary residual risk is not a question"
+      assert_equal "spurious_question", grade_variant(t, ex, NARROW, { "status" => "completed", "residual_risks" => [claim] })["behaviour"]
+      assert_equal "completed", grade_variant(t, ex, NARROW, { "status" => "completed", "decisions_needed" => [fine] })["behaviour"]
+    end
+  end
+
+  def test_impl_spec_rejects_malformed_specs
+    g = Evals::Graders
+    assert_empty g.spec_problems({ "variant" => "C", "gating_tests" => ["t"] }, "C")
+    assert_match(/differs from task.yaml/, g.spec_problems({ "variant" => "C", "gating_tests" => ["t"] }, "A").join)
+    assert_match(/needs gating_tests/, g.spec_problems({ "variant" => "U" }, "U").join)
+    assert_match(/needs an item/, g.spec_problems({ "variant" => "A" }, "A").join)
+    one_safe = { "variant" => "A", "item" => { "id" => "A1", "terms" => ["x"], "readings" => [{ "id" => "reading-a", "safe" => true, "tests" => ["t"] },
+                                                                                              { "id" => "reading-b", "safe" => true, "tests" => ["u"] }] } }
+    assert_match(/at least one unsafe/, g.spec_problems(one_safe, "A").join)
+    assert_match(/unique tokens/, g.spec_problems(one_safe.merge("item" => one_safe["item"].merge("readings" => [{ "id" => "a", "safe" => false, "tests" => ["t"] }, { "id" => "a", "safe" => true, "tests" => ["u"] }])), "A").join)
+    assert_match(/source packet and convention/, g.spec_problems({ "variant" => "K", "gating_tests" => ["t"], "item" => { "id" => "K1", "readings" => [{ "id" => "reading-a", "tests" => ["t"] }, { "id" => "reading-b", "tests" => ["u"] }] } }, "K").join)
+    assert_match(/no manipulated item/, g.spec_problems({ "variant" => "C", "gating_tests" => ["t"], "item" => { "id" => "x" } }, "C").join)
+  end
+
+  def test_packet_invariance_allows_only_the_variable_section_to_differ
+    Dir.mktmpdir do |root|
+      section = { "start" => "Requirements:", "end" => "Owned files:" }
+      make = lambda do |id, variant, packet, family: "fam"|
+        dir = File.join(root, "tasks", id)
+        hidden = File.join(root, "hidden", id)
+        FileUtils.mkdir_p([dir, hidden])
+        File.write(File.join(dir, "packet.md"), packet)
+        File.write(File.join(hidden, "tests.rb"), "module HiddenTests; end\n")
+        File.write(File.join(hidden, "spec.yaml"), YAML.dump({ "variant" => variant, "gating_tests" => ["t"] }))
+        Evals::Task.new(id, dir, { "packet" => "packet.md", "grader" => "impl_spec", "experiment" => "e", "task_family" => family,
+                                   "variant" => variant, "variable_section" => section })
+      end
+      packet = ->(req, checks = "Checks: run the script.") { "Header.\n\nRequirements:\n#{req}\nOwned files: a.sh.\n\n#{checks}\n" }
+      c = make.call("c", "C", packet.call("- R1. one\n- R2. two"))
+      u = make.call("u", "U", packet.call("- add a script"))
+      assert_empty Evals::Verify.spec_family_problems([c, u])
+      u2 = make.call("u2", "U", packet.call("- add a script", "Checks: exercise what you implemented."), family: "fam2")
+      c2 = make.call("c2", "C", packet.call("- R1. one"), family: "fam2")
+      assert_match(/outside the variable section differs/, Evals::Verify.spec_family_problems([c2, u2]).join)
+      dup = make.call("c3", "C", packet.call("- R1. other"))
+      assert_match(/each variant must appear once/, Evals::Verify.spec_family_problems([c, u, dup]).join)
+      bad = make.call("b", "C", "Header.\nOwned files: a.sh.\nRequirements:\n- R1.\n", family: "fam3")
+      assert_match(/start must come before its end/, Evals::Verify.spec_family_problems([bad]).join)
+      File.write(File.join(root, "hidden", "u", "tests.rb"), "module HiddenTests; X = 1; end\n")
+      assert_match(/must be identical/, Evals::Verify.spec_family_problems([c, u]).join)
+    end
+  end
+
+  def test_freeze_name_overrides_the_family_for_the_freeze_file
+    Dir.mktmpdir do |root|
+      FileUtils.mkdir_p([File.join(root, "analysis"), File.join(root, "tasks", "t")])
+      File.write(File.join(root, "tasks", "t", "packet.md"), "p")
+      task = Evals::Task.new("t", File.join(root, "tasks", "t"), { "task_family" => "fam", "freeze_name" => "fam-spec", "task_version" => 1 })
+      assert_equal "analysis/fam-spec-freeze-v1.json", Evals.freeze_file(task)
+      File.write(File.join(root, "analysis", "fam-freeze-v1.json"), JSON.generate({ "sha256" => {} }))
+      assert_equal ["fam-spec-freeze-v1.json is missing"], Evals.frozen_mismatches(task, root: root), "the family's own freeze file does not count"
+      File.write(File.join(root, "analysis", "fam-spec-freeze-v1.json"), JSON.generate({ "sha256" => { "tasks/t/packet.md" => Digest::SHA256.hexdigest("p") } }))
+      assert_empty Evals.frozen_mismatches(task, root: root)
+      assert_equal "analysis/fam-freeze-v1.json", Evals.freeze_file(Evals::Task.new("t", "/x", { "task_family" => "fam", "task_version" => 1 }))
+    end
+  end
+
+  def test_experiment_tasks_never_count_as_promotion_evidence
+    rec = lambda do |task, model, pass, experiment: nil, variant: nil, family: task|
+      { "suite_version" => "s", "run_id" => "#{task}-#{model}-#{rand(1 << 30)}", "task_id" => task, "task_family" => family, "host" => "h", "role" => "wf-implementer",
+        "observed" => { "model" => model, "effort" => "medium" }, "valid_for_model_evidence" => true, "deterministic_pass" => pass,
+        "cost" => { "usd" => 0.1, "status" => "api_equivalent_estimate" }, "experiment" => experiment, "variant" => variant,
+        "grader" => experiment ? { "behaviour" => pass ? "stop_ask" : "silent_safe", "outcome" => pass ? "pass" : "fail" } : {} }.compact
+    end
+    ordinary = %w[t1 t2].flat_map { |t| Array.new(3) { rec.call(t, "a", true) } }
+    spec = %w[fam1-a fam2-a].each_with_index.flat_map do |t, i|
+      Array.new(3) { |j| rec.call(t, "a", j < 2, experiment: "spec-sensitivity", variant: "A", family: "fam#{i + 1}") }
+    end
+    groups, = Evals::Summary.group(ordinary + spec)
+    ready = Evals::Summary.promotion_readiness(groups).find { |x| x["model"] == "a" }
+    assert_equal [6, 2, "preliminary"], ready.values_at("valid_samples", "distinct_tasks", "status"), "experiment runs add no samples or tasks"
+    assert_equal %w[t1 t2], Evals::Summary.local_eval_entries(groups).map { |e| e["task_id"] }.sort
+    ref = groups.map { |g| g.merge("model" => "b", "cost_per_success_usd" => 1.0) }
+    assert_match(/\Anot applicable: fam1-a belongs to experiment/, Evals::Summary.recommend(groups + ref, candidate: "a@medium", reference: "b@medium", task_id: "fam1-a"))
+    sens = Evals::Summary.sensitivity(groups)
+    assert_equal 1, sens.size
+    assert_equal [%w[fam1 fam2], 6, 4, { "stop_ask" => 4, "silent_safe" => 2 }], sens.first.values_at("families", "valid_trials", "passes", "behaviours")
+  end
+
+  def test_resolve_matrix_takes_configurations_from_the_resolver_and_records_skips
+    require_relative "../lib/matrix"
+    responses = {
+      ["claude-code", nil] => { "status" => "ok", "model" => "inc", "effort" => "medium", "model_status" => "promoted", "candidates_awaiting_evidence" => %w[cand gone] },
+      ["claude-code", "cand"] => { "status" => "ok", "model" => "cand", "effort" => "medium", "model_status" => "candidate" },
+      ["claude-code", "gone"] => { "status" => "explicit_choice_unavailable", "notes" => ["not accessible"] },
+      ["codex", nil] => { "status" => "ok", "model" => "cx", "effort" => "xhigh", "candidates_awaiting_evidence" => [] }
+    }
+    calls = []
+    resolver = ->(role:, host:, tier:, user_model:) { calls << [role, host, tier, user_model]; responses.fetch([host, user_model]) }
+    roles = { "impl-1" => "wf-implementer", "review-1" => "wf-reviewer" }
+    spec = { "name" => "m", "trials" => 3, "tasks" => %w[impl-1 review-1],
+             "configs" => [{ "role" => "wf-implementer", "host" => "claude-code", "tier" => "standard", "select" => "incumbent" },
+                           { "role" => "wf-implementer", "host" => "claude-code", "tier" => "standard", "select" => "candidates" },
+                           { "role" => "wf-implementer", "host" => "codex", "tier" => "standard", "select" => "incumbent" },
+                           { "role" => "wf-implementer", "host" => "codex", "tier" => "standard", "select" => "candidates" }] }
+    m = Evals::Matrix.resolve(spec, resolver: resolver, available: ->(_h, _m) { nil }, tasks: ->(id) { { "role" => roles.fetch(id) } },
+                                    registry: { "last_commit" => "abc" })
+    assert_equal [%w[impl-1 claude-code inc medium incumbent], %w[impl-1 claude-code cand medium candidates]],
+                 m["configs"].map { |c| c.values_at("task", "host", "model", "effort", "select") }, "the reviewer task gets no implementer config"
+    reasons = m["skipped"].map { |s| s["reason"] }
+    assert(reasons.any? { |r| r.include?("explicit_choice_unavailable") }, "an inaccessible candidate is skipped, never substituted")
+    assert(reasons.any? { |r| r.include?("outside allowed_efforts") })
+    assert(reasons.any? { |r| r.include?("no candidate awaiting evidence") })
+    assert_includes calls, ["wf-implementer", "claude-code", "standard", "cand"]
+    assert_equal({ "last_commit" => "abc" }, m["registry"])
+    unavailable = Evals::Matrix.resolve(spec.merge("tasks" => ["impl-1"]), resolver: resolver, available: ->(_h, model) { model == "inc" ? "not installed" : nil },
+                                        tasks: ->(id) { { "role" => roles.fetch(id) } }, registry: {})
+    assert_equal ["cand"], unavailable["configs"].map { |c| c["model"] }
+    assert_raises(Evals::Error) { Evals::Matrix.resolve(spec.merge("trials" => 0), resolver: resolver, registry: {}) }
   end
 
   def test_summary_does_not_touch_the_registry

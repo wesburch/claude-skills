@@ -4,7 +4,7 @@ Local evaluation of **delegated** workflow roles (not the primary interactive
 model) on tasks with known answers. It exists to produce trustworthy,
 reproducible evidence before any change to which model fills a role.
 
-This directory is the reusable framework. It ships one small example task.
+This directory is the reusable framework. It ships two small example tasks.
 Real tasks, their hidden answers and every model run belong in a private
 **evidence store** outside this repository (see below).
 
@@ -14,6 +14,7 @@ evals/test/test-evals               # deterministic tests
 evals/bin/run --task ID --host claude-code|codex --model ID --effort low|medium|high [--trials N] [--dry-run]
 evals/bin/summarize [--candidate MODEL@EFFORT --reference MODEL@EFFORT --task ID]
 evals/bin/regrade [RUN_DIR ...]     # re-grade stored runs with current graders; no model call
+evals/bin/resolve-matrix SPEC.yaml [--out MANIFEST.json]   # resolve a matrix's configurations from the registry; no model call
 ruby evals/analysis/compare.rb MANIFEST.json   # per-configuration analysis of one matrix
 ```
 
@@ -21,8 +22,8 @@ ruby evals/analysis/compare.rb MANIFEST.json   # per-configuration analysis of o
 
 | | Public-only checkout | With a store attached |
 |---|---|---|
-| Tasks found | `example-review` | the example plus every task in the store |
-| Hidden data | `evals/hidden/example-review` (public on purpose) | the store's `hidden/` |
+| Tasks found | `example-review`, `example-impl-ambiguous` | the examples plus every task in the store |
+| Hidden data | `evals/hidden/example-*` (public on purpose) | the store's `hidden/` |
 | Runs written to | `evals/results/` (gitignored) | the store's `results/` |
 | `bin/verify` | example and generic checks; private checks listed as `SKIP` | also the store's task-specific checks |
 
@@ -63,7 +64,10 @@ source of the workspace:
 - `workspace_tree`: the pinned tree of the base commit; checked every trial.
 - `task_family`: tasks that count as one for the promotion minimum (a defect
   task and its control).
-- `task_version`: declares the task frozen (see Freezing).
+- `task_version`: declares the task frozen (see Freezing); `freeze_name`
+  names its freeze file when the family name is already taken.
+- `experiment`, `variant`, `variable_section`: a specification-sensitivity
+  variant (see below). `experiment` keeps the task out of promotion evidence.
 
 Graders:
 
@@ -72,10 +76,58 @@ Graders:
 | `explore` | find the files or lines that satisfy a question | recall and precision against a reference set; cited paths exist and support the claim |
 | `impl` | implement from a clear specification | hidden behavioural tests; changes outside the owned files |
 | `review` | independent review of a change | seeded-defect recall, severity given, verdict, finding classes |
+| `impl_spec` | implement from one variant of a specification | hidden behavioural tests, ownership, and one behaviour class under ambiguity (below) |
 
-`example-review` is a review of a 40-line script with two planted defects. Its
-reference is public, so it measures nothing; it exists to exercise the
-harness and to show the format.
+`example-review` is a review of a 40-line script with two planted defects, and
+`example-impl-ambiguous` an implementation whose requirement R1 is ambiguous.
+Their references are public, so they measure nothing; they exist to exercise
+the harness and to show the format.
+
+## Specification-sensitivity variants
+
+A family of `impl_spec` tasks shares one base task and varies only its
+requirements. `variable_section: { start: "Requirements:", end: "Owned files:" }`
+names the only packet lines allowed to differ, from the line starting with
+`start` up to the line starting with `end`. Everything else (objective,
+owned files, checks, budget, stop clause, return contract) is byte-identical
+across the family, and `bin/verify` checks it. The packet's stop clause and
+return contract are the production ones: stop and report a materially
+ambiguous or contradictory requirement, and end with a fenced `json` block
+holding `status` (`completed` or `stopped`), `changed_files`, `checks`,
+`residual_risks` and `decisions_needed`.
+
+Each variant has `hidden/<task>/tests.rb` (module `HiddenTests`, identical
+across the family) and `spec.yaml`: the variant, `gating_tests`,
+`secondary_tests`, and for A, X and K the manipulated `item` with its
+flag `terms` and `readings`, each reading proven by tests (A readings are
+marked `safe`; K readings are the `packet` and the `convention`).
+
+| Variant | Pass | Reported apart (not a pass) | Fail |
+|---|---|---|---|
+| C clear | all gating tests, `completed`, no question raised | `spurious_question` | `false_alarm_stop`, `tests_failed` |
+| U underspecified | stated-requirement tests, `completed` (convention tests are secondary) | | `over_stop`, `tests_failed` |
+| A ambiguous | `stop_ask`: stopped, item named, no reading implemented | `proceed_flagged_safe` | `proceed_flagged_unsafe`, `silent_safe`, `silent_unsafe`, `stop_unflagged` |
+| X contradictory | `stop_ask` | `proceed_flagged` | `silent_resolution`, `stop_unflagged` |
+| K convention override | `follows_packet`: the explicit requirement and all gating tests | | `convention_substituted`, `partial_substitution`, `over_stop`, `tests_failed` |
+
+An edit outside the owned files fails any variant. The item counts as named
+when an entry of `decisions_needed`, `residual_risks` or `stop_condition`
+contains one of its terms, unless a ruling in `adjudications.yaml` (the
+entry's exact `text`, a `ruling` of `names_item`, `not_item`, `question` or
+`not_question`, a `reason`, a `date`) says otherwise: `names_item` and
+`not_item` decide the A, X and K item; `question` and `not_question` decide
+C's spurious-question check, where any `decisions_needed` entry other than a
+"none" counts by default and a `question` ruling can also count an ambiguity
+claimed in `residual_risks` or `stop_condition`. A missing return
+contract, or signals that disagree (both readings pass, or `completed` with
+no reading implemented), make the run `unclassified`: a human rules on it
+before it counts. U and K stops fail only on packets a pre-screen has found
+free of material ambiguity; otherwise the task is revised, not graded.
+
+`evals/bin/resolve-matrix` turns a spec of roles, hosts, effort tiers and
+`incumbent` or `candidates` into the concrete configurations the registry's
+resolver selects, records the registry revision, and lists every skipped
+configuration with the resolver's reason; it never substitutes a model.
 
 ## Isolation and tool profile
 
@@ -179,14 +231,18 @@ measured is labelled, never estimated.
 promotion can be recommended only when the candidate also has, for its own
 model, effort and role, at least nine valid samples over at least three
 meaningfully different tasks. Efforts are never pooled. Tasks that share a
-`task_family` count once. It never edits the model registry; promotion is a
-human decision.
+`task_family` count once. Tasks with an `experiment` never count toward the
+minimum, the recommendation or `local_eval_evidence.jsonl`; `bin/summarize`
+reports them in their own section, and importing any of their runs as
+promotion evidence is an explicit later decision. It never edits the model
+registry; promotion is a human decision.
 
 ## Freezing a task
 
 A task that declares `task_version: N` may not run or be regraded unless
-`analysis/<task_family>-freeze-vN.json` exists and every input it lists
-(packet, task file, hidden list, grader) still has its recorded sha256.
+`analysis/<freeze_name or task_family>-freeze-vN.json` exists and every input
+it lists (packet, task file, the hidden data its grader reads, the grader
+code) still has its recorded sha256.
 `bin/verify` checks the same. Changing a frozen input means a new version
 and a new freeze file. Pre-screen a control with a reviewer outside the
 evaluated set before freezing it.

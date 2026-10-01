@@ -14,7 +14,7 @@
 # match the request; otherwise it is kept and attributed to what actually ran.
 
 require_relative "../lib/eval_support"
-require_relative "../lib/graders"
+require_relative "../lib/spec_graders" # loads lib/graders too
 require "optparse"
 
 opts = { trials: 1, timeout: 1800 }
@@ -187,6 +187,8 @@ def run_trial(task, opts, trial)
       "grader_fingerprint" => Evals.grader_fingerprint(task),
       "diff_includes_new_files" => true
     }
+    # Present only for experiment tasks; summaries keep those out of promotion evidence.
+    %w[experiment variant].each { |k| record[k] = task[k] if task[k] }
     audit = Evals::IsolationAudit.for_run(run_dir, record, task)
     record["isolation_audit"] = audit if audit
     record["contamination"] = Evals::IsolationAudit.contamination_summary(audit)
@@ -204,7 +206,8 @@ opts[:trials].times do |i|
   rec = run_trial(task, opts, i + 1)
   next unless rec
   g = rec["grader"]
-  metric = g.slice("recall", "precision", "tests_passed", "critical_recall", "total_recall", "verdict", "verdict_correct", "incorrect_findings", "unclassified_findings").map { |k, v| "#{k}=#{v}" }.join(" ")
+  metric = g.slice("recall", "precision", "tests_passed", "critical_recall", "total_recall", "verdict", "verdict_correct", "incorrect_findings", "unclassified_findings",
+                   "variant", "behaviour", "outcome").map { |k, v| "#{k}=#{v}" }.join(" ")
   puts format("%s pass=%s valid=%s observed=%s@%s tokens=%s cost=%s(%s) %s",
               rec["run_id"], rec["deterministic_pass"], rec["valid_for_model_evidence"],
               rec.dig("observed", "model"), rec.dig("observed", "effort"), rec["tokens"].values_at("input", "output").join("/"),
