@@ -15,10 +15,14 @@
 
 require "json"
 require_relative "../lib/eval_support"
+require_relative "../lib/summary"
 
 Encoding.default_external = Encoding::UTF_8
 manifest = JSON.parse(File.read(ARGV[0] || abort("usage: compare.rb MANIFEST.json")))
-records = manifest["run_dirs"].map { |d| JSON.parse(File.read(File.join(Evals.data_path(d), "record.json"))).merge("_dir" => d) }
+# Only the manifest's own run set: every listed run belongs to one of its
+# tasks, and to its experiment and experiment_version (lib/summary.rb).
+records, problems = Evals::Summary.manifest_records(manifest)
+abort "compare.rb: #{manifest['name']}: the listed runs are not this manifest's run set:\n  #{problems.join("\n  ")}" unless problems.empty?
 
 def median(v)
   v = v.compact.sort

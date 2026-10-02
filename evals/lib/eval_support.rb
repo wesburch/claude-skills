@@ -461,13 +461,17 @@ module Evals
 
   def valid_for_model_evidence?(rec) = invalid_reasons(rec).empty?
 
+  # Grader code beyond lib/graders.rb that decides a grade, by grader name
+  # (lib/ paths). impl_spec_v2 reuses impl_spec's file, so both are inputs.
+  SPEC_GRADER_FILES = { "impl_spec" => %w[spec_graders.rb], "impl_spec_v2" => %w[spec_graders.rb spec_graders_v2.rb] }.freeze
+
   # What produced a run: harness revision and digests of every input that
   # shapes the prompt, tools or grade.
   # Digests of what decides a grade: graders and the task's hidden data.
   def grader_fingerprint(task)
     files = { "graders.rb" => File.join(__dir__, "graders.rb"), "isolation_audit.rb" => File.join(__dir__, "isolation_audit.rb"),
               "task.yaml" => File.join(task.dir, "task.yaml") }
-    files["spec_graders.rb"] = File.join(__dir__, "spec_graders.rb") if task["grader"] == "impl_spec"
+    Array(SPEC_GRADER_FILES[task["grader"]]).each { |f| files[f] = File.join(__dir__, f) }
     Dir.glob(File.join(task.hidden_dir, "*")).each { |f| files["hidden/#{File.basename(f)}"] = f }
     files.transform_values { |p| File.file?(p) ? Digest::SHA256.file(p).hexdigest[0, 16] : nil }
   end
@@ -479,7 +483,7 @@ module Evals
               "guard" => guard_path, "codex-delegate" => File.join(SCRIPTS, "codex-delegate"),
               "eval_support.rb" => __FILE__, "graders.rb" => File.join(__dir__, "graders.rb"),
               "isolation_audit.rb" => File.join(__dir__, "isolation_audit.rb") }
-    files["spec_graders.rb"] = File.join(__dir__, "spec_graders.rb") if task["grader"] == "impl_spec"
+    Array(SPEC_GRADER_FILES[task["grader"]]).each { |f| files[f] = File.join(__dir__, f) }
     Dir.glob(File.join(task.hidden_dir, "*")).each { |f| files["hidden/#{File.basename(f)}"] = f }
     { "git_sha" => (Open3.capture2("git", "-C", REPO, "rev-parse", "HEAD").first.strip rescue nil),
       "dirty" => !(Open3.capture2("git", "-C", REPO, "status", "--porcelain", "--", ".", ":!evals/results").first.strip.empty? rescue true),

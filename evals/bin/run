@@ -14,7 +14,7 @@
 # match the request; otherwise it is kept and attributed to what actually ran.
 
 require_relative "../lib/eval_support"
-require_relative "../lib/spec_graders" # loads lib/graders too
+require_relative "../lib/spec_graders_v2" # loads lib/spec_graders and lib/graders too
 require "optparse"
 
 opts = { trials: 1, timeout: 1800 }
@@ -188,7 +188,7 @@ def run_trial(task, opts, trial)
       "diff_includes_new_files" => true
     }
     # Present only for experiment tasks; summaries keep those out of promotion evidence.
-    %w[experiment variant].each { |k| record[k] = task[k] if task[k] }
+    %w[experiment experiment_version variant].each { |k| record[k] = task[k] if task[k] }
     audit = Evals::IsolationAudit.for_run(run_dir, record, task)
     record["isolation_audit"] = audit if audit
     record["contamination"] = Evals::IsolationAudit.contamination_summary(audit)

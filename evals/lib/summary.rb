@@ -47,7 +47,7 @@ module Evals
         {
           "task_id" => task, "host" => host, "model" => model, "effort" => effort, "suite_versions" => runs.map { |r| r["suite_version"] }.uniq.sort, "category" => runs.first["category"],
           "role" => runs.first["role"], "task_family" => runs.first["task_family"] || task,
-          "experiment" => runs.first["experiment"], "variant" => runs.first["variant"],
+          "experiment" => runs.first["experiment"], "experiment_version" => runs.first["experiment_version"], "variant" => runs.first["variant"],
           "valid_trials" => runs.size, "passes" => passes, "pass_rate" => (passes.to_f / runs.size).round(3),
           "median_wall_seconds" => median(runs.map { |r| r["wall_seconds"] }),
           "median_tokens" => { "input" => median(runs.map { |r| r.dig("tokens", "input") }),
@@ -150,22 +150,100 @@ module Evals
       end
     end
 
-    # Specification-sensitivity view of experiment tasks: one row per
-    # experiment, variant, host, model and effort, pooled over task families
-    # (each family is one base task), with the behaviour classes counted.
+    # Unscoped view of experiment tasks: one row per task, host, model and
+    # effort over every stored run, proving runs included. Nothing is pooled,
+    # so families and experiment versions never mix; it is a listing, not an
+    # analysis (an analysis reads a manifest: see manifest_records).
+    def sensitivity_by_task(groups)
+      groups.select { |g| g["experiment"] }.map do |g|
+        g.slice("task_id", "experiment", "experiment_version", "variant", "task_family", "host", "model", "effort", "valid_trials", "passes", "pass_rate")
+         .merge("behaviours" => g["behaviours"] || {}, "outcomes" => g["outcomes"] || {})
+      end.sort_by { |x| x.values_at("task_id", "host", "model", "effort").map(&:to_s) }
+    end
+
+    # Specification-sensitivity view of one manifest's run set: one row per
+    # experiment, experiment version, variant, host, model and effort, pooled
+    # over the manifest's task families, with the behaviour classes counted.
     def sensitivity(groups)
-      groups.select { |g| g["experiment"] }.group_by { |g| g.values_at("experiment", "variant", "host", "model", "effort") }
-            .map do |(experiment, variant, host, model, effort), gs|
+      groups.select { |g| g["experiment"] }.group_by { |g| g.values_at("experiment", "experiment_version", "variant", "host", "model", "effort") }
+            .map do |(experiment, version, variant, host, model, effort), gs|
         n = gs.sum { |g| g["valid_trials"] }
         passes = gs.sum { |g| g["passes"] }
         sum_tally = ->(k) { gs.map { |g| g[k] || {} }.reduce({}) { |a, b| a.merge(b) { |_, x, y| x + y } } }
-        { "experiment" => experiment, "variant" => variant, "host" => host, "model" => model, "effort" => effort,
+        { "experiment" => experiment, "experiment_version" => version || 1, "variant" => variant, "host" => host, "model" => model, "effort" => effort,
           "families" => gs.map { |g| g["task_family"] }.uniq.sort, "tasks" => gs.map { |g| g["task_id"] }.sort,
           "valid_trials" => n, "passes" => passes, "pass_rate" => n.positive? ? (passes.to_f / n).round(3) : nil,
           "behaviours" => sum_tally.call("behaviours"), "outcomes" => sum_tally.call("outcomes"),
           "unclassified" => sum_tally.call("outcomes")["unclassified"].to_i,
+          "pending_confirmation" => sum_tally.call("outcomes")["pending_confirmation"].to_i,
           "median_of_task_median_cost_usd" => median(gs.map { |g| g["median_cost_usd"] }) }
-      end.sort_by { |x| x.values_at("experiment", "variant", "host", "model", "effort").map(&:to_s) }
+      end.sort_by { |x| x.values_at("experiment", "experiment_version", "variant", "host", "model", "effort").map(&:to_s) }
+    end
+
+    # The run set a matrix manifest names, and nothing else: the records of
+    # its run_dirs (store-relative, or absolute). Returns [records, problems];
+    # any problem means the set is not the manifest's and must not be
+    # analysed. A record must belong to one of the manifest's configured
+    # tasks; a run of an experiment task must match the experiment and
+    # experiment_version (absent means 1) that the manifest's tasks_meta
+    # records for that task (bin/resolve-matrix writes it); and the experiment
+    # tasks in one manifest share a single experiment and version. Proving
+    # runs are excluded by construction: they are never listed in a manifest.
+    def manifest_records(manifest)
+      return [[], ["the manifest is not a mapping"]] unless manifest.is_a?(Hash)
+      configs = Array(manifest["configs"])
+      problems = configs.each_with_index.reject { |c, _| c.is_a?(Hash) && c["task"] }.map { |_, i| "config #{i}: not a mapping with a task" }
+      tasks = configs.select { |c| c.is_a?(Hash) }.map { |c| c["task"] }.compact.uniq
+      meta = manifest["tasks_meta"].is_a?(Hash) ? manifest["tasks_meta"] : {}
+      dirs = Array(manifest["run_dirs"])
+      problems += dirs.tally.select { |_, n| n > 1 }.keys.map { |d| "#{d}: listed more than once" }
+      records = dirs.uniq.filter_map do |d|
+        file = File.join(File.absolute_path?(d) ? d : Evals.data_path(d), "record.json")
+        unless File.file?(file)
+          problems << "#{d}: no record.json"
+          next
+        end
+        r = JSON.parse(File.read(file)).merge("_dir" => d)
+        problems << "#{r['run_id']}: task #{r['task_id']} is not one of the manifest's tasks" unless tasks.include?(r["task_id"])
+        if (m = meta[r["task_id"]])
+          problems << "#{r['run_id']}: experiment #{r['experiment'].inspect} differs from the manifest's #{m['experiment'].inspect}" if r["experiment"] != m["experiment"]
+          if (r["experiment_version"] || 1) != (m["experiment_version"] || 1)
+            problems << "#{r['run_id']}: experiment_version #{r['experiment_version'] || 1} differs from the manifest's #{m['experiment_version'] || 1}"
+          end
+        elsif r["experiment"]
+          problems << "#{r['run_id']}: experiment task #{r['task_id']} has no tasks_meta entry in the manifest"
+        end
+        r
+      end
+      versions = records.select { |r| r["experiment"] }.map { |r| [r["experiment"], r["experiment_version"] || 1] }.uniq
+      problems << "the manifest mixes experiments or experiment versions: #{versions.inspect}" if versions.size > 1
+      [records, problems]
+    end
+
+    # The runs an analysis of the manifest uses, by the same rule as
+    # analysis/compare.rb: per configuration, valid runs that observed the
+    # requested model and effort, the first `trials` of them in time order.
+    # Returns [used, unused] where unused carries the reason.
+    def manifest_selection(manifest, records)
+      used = []
+      unused = []
+      Array(manifest["configs"]).each do |c|
+        attempted = records.select { |r| [r["task_id"], r["host"], r.dig("requested", "model"), r.dig("requested", "effort")] == c.values_at("task", "host", "model", "effort") }
+        valid = attempted.select { |r| r["valid_for_model_evidence"] && r["observed"] == r["requested"] }.sort_by { |r| r["start"] }
+        chosen = valid.first(manifest["trials"] || valid.size)
+        used.concat(chosen)
+        (attempted - chosen).each do |r|
+          reasons = if valid.include?(r) then ["valid but beyond the approved #{manifest['trials']} trials (not used)"]
+                    elsif r["valid_for_model_evidence"] then ["observed #{r['observed'].inspect} is not the requested #{r['requested'].inspect}"]
+                    else Evals.invalid_reasons(r)
+                    end
+          unused << { "run_id" => r["run_id"], "reasons" => reasons }
+        end
+      end
+      (records - used - records.select { |r| unused.any? { |u| u["run_id"] == r["run_id"] } }).each do |r|
+        unused << { "run_id" => r["run_id"], "reasons" => ["matches no configuration of the manifest"] }
+      end
+      [used, unused]
     end
   end
 end

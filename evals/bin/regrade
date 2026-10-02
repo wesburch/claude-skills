@@ -14,7 +14,7 @@
 # the record, the saved packet and the saved reply.
 
 require_relative "../lib/eval_support"
-require_relative "../lib/spec_graders" # loads lib/graders too
+require_relative "../lib/spec_graders_v2" # loads lib/spec_graders and lib/graders too
 
 dirs = ARGV.empty? ? Dir.glob(File.join(Evals.results_dir, "*", "*")).select { |d| File.exist?(File.join(d, "record.json")) } : ARGV
 dirs.sort.each do |dir|
@@ -72,7 +72,7 @@ dirs.sort.each do |dir|
   rec["contamination"] = Evals::IsolationAudit.contamination_summary(audit)
   rec["grading_version"] = Evals.config["grading_version"]
   rec["task_family"] = task["task_family"] || task.id
-  %w[experiment variant].each { |k| task[k] ? rec[k] = task[k] : rec.delete(k) }
+  %w[experiment experiment_version variant].each { |k| task[k] ? rec[k] = task[k] : rec.delete(k) }
   saved_packet = File.read(File.join(dir, "packet.md")) rescue task.packet_text
   rec["cost_breakdown"] = Evals.cost_breakdown(rec, task, packet: saved_packet, final: final)
   rec["invalid_reasons"] = Evals.invalid_reasons(rec)

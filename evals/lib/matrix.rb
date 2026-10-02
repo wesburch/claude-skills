@@ -15,6 +15,11 @@
 #     - { role: wf-implementer, host: claude-code, tier: standard, select: incumbent }
 #     - { role: wf-implementer, host: claude-code, tier: standard, select: candidates }
 #
+# Experiment tasks (`experiment` in task.yaml) are recorded in `tasks_meta`
+# with their experiment, experiment_version (absent means 1), variant and
+# family, so analysis/compare.rb and `bin/summarize --manifest` can refuse a
+# listed run from another experiment or version.
+#
 # `incumbent` is what the resolver selects for the role, host and tier.
 # `candidates` is every candidate the resolver lists as awaiting evidence,
 # each resolved as an explicit choice at the same tier; one the account cannot
@@ -77,7 +82,8 @@ module Evals
 
     # resolver: (role:, host:, tier:, user_model:) -> resolver JSON hash
     # available: (host, model) -> nil when the harness can run it, else why not
-    # tasks: task id -> Evals::Task (or anything answering ["role"])
+    # tasks: task id -> Evals::Task (or anything answering ["role"] and the
+    #        experiment fields)
     def resolve(spec, resolver: method(:model_routing), available: method(:harness_available),
                 tasks: ->(id) { Evals.load_task(id) }, registry: nil)
       problems = spec_problems(spec)
@@ -114,11 +120,14 @@ module Evals
         chosen.select { |c| c["role"] == role }.map { |c| { "task" => id, "host" => c["host"], "model" => c["model"], "effort" => c["effort"] }.merge(c.slice("role", "tier", "select")) }
       end
       raise Evals::Error, "no configuration resolved for any task" if configs.empty?
+      meta = spec["tasks"].to_h { |id| [id, tasks.call(id)] }.select { |_, t| t["experiment"] }.transform_values do |t|
+        { "experiment" => t["experiment"], "experiment_version" => t["experiment_version"] || 1, "variant" => t["variant"], "task_family" => t["task_family"] }.compact
+      end
       {
         "name" => spec["name"], "trials" => spec["trials"], "output" => spec["output"],
         "resolved_at" => Time.now.utc.iso8601, "registry" => registry || registry_revision,
         "spec" => spec.slice("tasks", "configs"), "resolutions" => resolutions, "skipped" => skipped,
-        "configs" => configs, "run_dirs" => []
+        "configs" => configs, "tasks_meta" => meta.empty? ? nil : meta, "run_dirs" => []
       }.compact
     end
   end

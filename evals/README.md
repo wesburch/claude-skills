@@ -13,6 +13,7 @@ evals/bin/verify                    # no-model proof of the harness; lists what 
 evals/test/test-evals               # deterministic tests
 evals/bin/run --task ID --host claude-code|codex --model ID --effort low|medium|high [--trials N] [--dry-run]
 evals/bin/summarize [--candidate MODEL@EFFORT --reference MODEL@EFFORT --task ID]
+evals/bin/summarize --manifest MANIFEST.json   # one matrix's specification-sensitivity view; writes nothing
 evals/bin/regrade [RUN_DIR ...]     # re-grade stored runs with current graders; no model call
 evals/bin/resolve-matrix SPEC.yaml [--out MANIFEST.json]   # resolve a matrix's configurations from the registry; no model call
 ruby evals/analysis/compare.rb MANIFEST.json   # per-configuration analysis of one matrix
@@ -124,6 +125,40 @@ no reading implemented), make the run `unclassified`: a human rules on it
 before it counts. U and K stops fail only on packets a pre-screen has found
 free of material ambiguity; otherwise the task is revised, not graded.
 
+### Version 2 (`impl_spec_v2`)
+
+Keyword matching cannot tell a reply that flags an ambiguity while
+proceeding from one that only describes the consequences of the reading it
+chose. Experiment version 2 therefore takes the A and X class from the
+run's status and the reading tests alone. A family's tasks declare
+`experiment_version: 2` and `grader: impl_spec_v2`. `lib/spec_graders.rb`
+(`impl_spec`, version 1) is unchanged, so version 1 freezes and regrades
+replay exactly, and the two versions of a family are checked as separate
+families.
+
+| Variant | Pass | Noncompliant | Fail |
+|---|---|---|---|
+| A | `stop_recognized` | `proceed_safe` | `stop_unrecognized`, `proceed_unsafe` |
+| X | `stop_recognized` | `proceed_side_1`, `proceed_side_2` | `stop_unrecognized` |
+
+C, U and K are classified exactly as in version 1. A stop is recognized
+only on a human ruling: keywords nominate candidates, and a stopped run with
+any reply entry not yet ruled on is `stop_pending_confirmation` (outcome
+`pending_confirmation`, never a pass) until each entry has a `names_item` or
+`not_item` ruling. A stop with no reply entries is `stop_unrecognized`.
+Version 2 rulings also need a `provenance` (who ruled, on which run);
+grading stops on a malformed ruling rather than honouring or skipping it. For a
+run that proceeds, whether its reply mentions the item is reported in
+`mentions_item` with its basis (`keyword`, `human` or `none`); it never
+changes the class or the outcome and needs no ruling.
+
+A reading marked `absence: true` is one whose tests also pass when the
+manipulated requirement was simply not implemented (for example "nothing is
+written under HOME"). It counts as the reading chosen only when the run
+completed; a stopped run that did unrelated work is not taken to have chosen
+it. Two readings passing at once, or `completed` with no reading, is
+`unclassified`.
+
 `evals/bin/resolve-matrix` turns a spec of roles, hosts, effort tiers and
 `incumbent` or `candidates` into the concrete configurations the registry's
 resolver selects, records the registry revision, and lists every skipped
@@ -227,7 +262,14 @@ measured is labelled, never estimated.
 ## Promotion
 
 `bin/summarize` prints a recommendation against the acceptance bar in
-`config.yaml`. Clearing that per-task bar is a **preliminary** result. A
+`config.yaml`. Its experiment section lists every stored run of an
+experiment task, proving runs included, one row per task, and is not an
+analysis: an experiment's results come from `bin/summarize --manifest` or
+`analysis/compare.rb`, which read only the run directories the manifest
+lists (proving runs are never listed), refuse a run whose task, experiment
+or `experiment_version` the manifest does not name (`bin/resolve-matrix`
+records both for each experiment task in `tasks_meta`), and write no summary or
+promotion evidence. Clearing that per-task bar is a **preliminary** result. A
 promotion can be recommended only when the candidate also has, for its own
 model, effort and role, at least nine valid samples over at least three
 meaningfully different tasks. Efforts are never pooled. Tasks that share a

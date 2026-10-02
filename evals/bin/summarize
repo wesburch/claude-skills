@@ -2,11 +2,20 @@
 # frozen_string_literal: true
 
 # evals/bin/summarize [--candidate MODEL@EFFORT --reference MODEL@EFFORT --task ID]
+# evals/bin/summarize --manifest MANIFEST.json
 #
 # Prints per-(task, host, observed model, observed effort) metrics from
 # results/**/record.json, lists runs excluded from model evidence and who they
 # are attributed to, writes results/summary.json and
 # results/local_eval_evidence.jsonl, and optionally prints a recommendation.
+# Its experiment section is unscoped (every stored run, proving runs
+# included, one row per task) and is not an analysis.
+#
+# With --manifest it reads only the run directories that manifest lists
+# (proving runs are never listed), refuses a run whose task, experiment or
+# experiment_version the manifest does not name, uses the same per-
+# configuration trial selection as analysis/compare.rb, prints the
+# specification-sensitivity view of that set, and writes nothing.
 # It never edits the model registry.
 
 require_relative "../lib/eval_support"
@@ -20,7 +29,44 @@ OptionParser.new do |o|
   o.on("--task ID") { |v| opts[:task] = v }
   o.on("--results DIR") { |v| opts[:dir] = v }
   o.on("--all-versions", "include runs from earlier suite versions") { opts[:all] = true }
+  o.on("--manifest FILE", "the specification-sensitivity view of one manifest's run set; writes nothing") { |v| opts[:manifest] = v }
 end.parse!
+
+def print_sensitivity(rows, title)
+  puts title
+  puts format("  %-18s %-3s %-3s %-11s %-18s %-7s %3s %5s %s", "experiment", "ver", "var", "host", "model", "effort", "n", "pass", "behaviours")
+  rows.each do |x|
+    puts format("  %-18s %-3s %-3s %-11s %-18s %-7s %3d %5s %s", x["experiment"], x["experiment_version"] || 1, x["variant"], x["host"], x["model"], x["effort"],
+                x["valid_trials"], x["pass_rate"].inspect, x["behaviours"].map { |k, v| "#{k}=#{v}" }.join(" "))
+  end
+end
+
+if opts[:manifest]
+  abort "evals/bin/summarize: --manifest cannot be combined with --candidate/--reference/--task, --results or --all-versions" if opts.keys.size > 1
+  path = File.file?(opts[:manifest]) ? opts[:manifest] : Evals.data_path(opts[:manifest])
+  manifest = JSON.parse(File.read(path))
+  records, problems = Evals::Summary.manifest_records(manifest)
+  abort "evals/bin/summarize: #{manifest['name']}: the listed runs are not this manifest's run set:\n  #{problems.join("\n  ")}" unless problems.empty?
+  used, unused = Evals::Summary.manifest_selection(manifest, records)
+  groups, = Evals::Summary.group(used)
+  rows = Evals::Summary.sensitivity(groups)
+  puts "manifest #{manifest['name']}: #{records.size} listed run(s), #{used.size} used (first #{manifest['trials'].inspect} valid per configuration), #{unused.size} not used"
+  puts
+  print_sensitivity(rows, "Specification sensitivity (this manifest's run set only):")
+  pending = used.select { |r| %w[unclassified pending_confirmation].include?(r.dig("grader", "outcome")) }
+  unless pending.empty?
+    puts "  Not yet counted (rule in hidden/<task>/adjudications.yaml, then regrade):"
+    pending.each { |r| puts "    #{r['run_id']}: #{r.dig('grader', 'outcome')}#{r.dig('grader', 'unclassified_reason') ? " (#{r.dig('grader', 'unclassified_reason')})" : ''}" }
+  end
+  unless unused.empty?
+    puts
+    puts "Listed but not used:"
+    unused.each { |u| puts "  #{u['run_id']}: #{u['reasons'].join('; ')}" }
+  end
+  puts
+  puts "Nothing written. Cost figures are API-equivalent estimates unless marked measured; they are not subscription charges."
+  exit 0
+end
 
 records = Evals::Summary.load_records(opts[:dir] || Evals.results_dir, all_versions: opts[:all])
 puts "suite #{opts[:all] ? 'all versions' : Evals.config['suite_version']}"
@@ -50,19 +96,20 @@ unless excluded.empty?
   puts "Excluded from model evidence (attributed to the model that ran):"
   excluded.each { |e| puts "  #{e['run_id']}: attributed to #{e['attributed_to']}; #{e['reasons'].join('; ')}" }
 end
-sensitivity = Evals::Summary.sensitivity(groups)
+sensitivity = Evals::Summary.sensitivity_by_task(groups)
 unless sensitivity.empty?
   puts
-  puts "Experiment tasks (not promotion evidence), pooled over task families:"
-  puts format("  %-18s %-3s %-11s %-18s %-7s %3s %5s %s", "experiment", "var", "host", "model", "effort", "n", "pass", "behaviours")
+  puts "Experiment tasks (not promotion evidence). UNSCOPED, NOT AN ANALYSIS: every stored run, proving runs included, one row per task."
+  puts "For an experiment's results use evals/bin/summarize --manifest MANIFEST.json or analysis/compare.rb."
+  puts format("  %-34s %-3s %-3s %-11s %-18s %-7s %3s %5s %s", "task", "ver", "var", "host", "model", "effort", "n", "pass", "behaviours")
   sensitivity.each do |x|
-    puts format("  %-18s %-3s %-11s %-18s %-7s %3d %5s %s", x["experiment"], x["variant"], x["host"], x["model"], x["effort"], x["valid_trials"],
-                x["pass_rate"].inspect, x["behaviours"].map { |k, v| "#{k}=#{v}" }.join(" "))
+    puts format("  %-34s %-3s %-3s %-11s %-18s %-7s %3d %5s %s", x["task_id"], x["experiment_version"] || 1, x["variant"], x["host"], x["model"], x["effort"],
+                x["valid_trials"], x["pass_rate"].inspect, x["behaviours"].map { |k, v| "#{k}=#{v}" }.join(" "))
   end
-  pending = records.select { |r| r["valid_for_model_evidence"] && r.dig("grader", "outcome") == "unclassified" }
+  pending = records.select { |r| r["valid_for_model_evidence"] && %w[unclassified pending_confirmation].include?(r.dig("grader", "outcome")) }
   unless pending.empty?
-    puts "  Unclassified behaviour (rule on it in hidden/<task>/adjudications.yaml before counting):"
-    pending.each { |r| puts "    #{r['run_id']}: #{r.dig('grader', 'unclassified_reason')}" }
+    puts "  Not yet counted (rule in hidden/<task>/adjudications.yaml, then regrade):"
+    pending.each { |r| puts "    #{r['run_id']}: #{r.dig('grader', 'outcome')}#{r.dig('grader', 'unclassified_reason') ? " (#{r.dig('grader', 'unclassified_reason')})" : ''}" }
   end
 end
 readiness = Evals::Summary.promotion_readiness(groups)
@@ -75,7 +122,7 @@ unless readiness.empty?
   end
 end
 FileUtils.mkdir_p(Evals.results_dir)
-File.write(File.join(Evals.results_dir, "summary.json"), JSON.pretty_generate({ "groups" => groups, "promotion_readiness" => readiness, "sensitivity" => sensitivity, "excluded" => excluded }))
+File.write(File.join(Evals.results_dir, "summary.json"), JSON.pretty_generate({ "groups" => groups, "promotion_readiness" => readiness, "experiment_tasks_unscoped" => sensitivity, "excluded" => excluded }))
 File.write(File.join(Evals.results_dir, "local_eval_evidence.jsonl"), Evals::Summary.local_eval_entries(groups).map { |e| JSON.generate(e) }.join("\n") + "\n")
 if opts[:candidate] && opts[:reference] && opts[:task]
   puts
