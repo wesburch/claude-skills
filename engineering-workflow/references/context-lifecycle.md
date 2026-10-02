@@ -111,6 +111,7 @@ When applicable:
 - rejected approaches the next agent is likely to propose again, with the reason;
 - constraints and authorization limits;
 - suggested profile and capability class (a model only if the user chose one);
+- suggested discipline, where useful for the next objective;
 - private context, named by role and never by path in a public artifact;
 - known failures that affect the next objective;
 - one line of friction that a pointer or check would remove.
@@ -172,6 +173,7 @@ One owner per fact; other places point to it.
 | Handoff | Next objective, start point, open and deferred items, pointers |
 | Task state | Progress, remaining work, frontier, blockers |
 | Git | Code and change history; commit or PR text where useful |
+| Domain glossary (`GLOSSARY.md`) | Durable domain terms and meanings, when needed |
 | ADR | Architecture decisions, under the project's convention (`decisions_store`) |
 | AGENTS.md, project instructions | Rules every future session needs |
 | Project docs and knowledge | Durable facts and design rationale ([knowledge-handoff.md](knowledge-handoff.md)) |

@@ -37,8 +37,8 @@ Global skills are custom commands (invoked with `/skill-name`) that extend Claud
    Checks that every skill/command in this repo is correctly symlinked into
    Claude and Codex, and that the repo's git state is clean and in sync with
    `origin`. Exits non-zero if anything needs attention. It only checks
-   skills defined in this repo — it doesn't know about unrelated skills
-   installed some other way (see [Duplicated/managed elsewhere](#a-note-on-other-skills-on-this-machine)
+   skills defined in this repo and the pinned third-party lock — unrelated skills are
+   outside its scope (see [Duplicated/managed elsewhere](#a-note-on-other-skills-on-this-machine)
    below).
 
 <details>
@@ -62,6 +62,35 @@ for cmd in ~/claude-skills/commands/*.md; do
 done
 ```
 </details>
+
+## Pinned third-party skills
+
+The workflow composes five skills by [Matt Pocock](https://github.com/mattpocock/skills):
+`grilling`, `domain-modeling`, `tdd`, `diagnosing-bugs`, and `codebase-design`.
+The upstream work is MIT licensed, copyright © 2026 Matt Pocock; its license and
+prose remain intact in the external checkout. See the
+[pinned license](https://github.com/mattpocock/skills/blob/d81f3a183412e71a5b1e84ca21bc1a35eea03a60/LICENSE).
+Workflow adaptations live in [disciplines.md](engineering-workflow/references/disciplines.md).
+
+[third-party/skills.lock](third-party/skills.lock) is the source of truth for
+source, exact revision (`d81f3a1`) and the five paths. `scripts/install.sh --dry-run`
+previews changes without network or writes; `scripts/install.sh` prepares one
+checkout at `~/.local/share/claude-skills/third-party/mattpocock-skills` and links
+only those five skills into both `~/.claude/skills` and `~/.codex/skills`.
+Dirty/unmanaged checkouts and conflicting personal files are left untouched.
+The checkout is detached at the pin; rerunning at that pin needs no network.
+
+After installation, disable the superseded plugin locally:
+`claude plugin disable mattpocock-skills@claude-plugins-official --scope user`.
+Keep it disabled so the old plugin and pinned skills are not both active.
+Restart existing sessions to refresh discovery, then run `scripts/doctor.sh`.
+Normal doctor is offline; `scripts/doctor.sh --upstream` explicitly checks
+upstream reachability without changing the pin.
+
+To update, deliberately review a candidate revision, update the full commit and
+selected paths in the lock, rerun dry-run/install/doctor and workflow checks,
+and review the integration. Upstream HEAD is never followed automatically:
+changes to discipline behavior need the same review as our adaptations.
 
 ## Codex (GPT) Installation
 

@@ -48,6 +48,24 @@ If quick reveals consequential or hard-to-detect risk, explain and add independe
 review using standard's gates. Never downgrade merely to bypass a finding.
 Full may simplify to standard as dependencies disappear, without restarting.
 
+## Select a specialist discipline only when needed
+
+Default to none; select at most one discipline per phase. An explicit user
+request wins, subject to workflow safety and completion gates.
+
+- Planning: multiple unresolved user-owned decisions affecting acceptance →
+  `grilling`; new or contested domain concepts → `domain-modeling`; a central
+  module responsibility, interface or seam problem → `codebase-design`.
+- Execution: unknown failure cause → `diagnosing-bugs`; otherwise STANDARD/FULL
+  new behavior at an untested seam → `tdd`.
+- Unknown facts remain explorer/research assignments, not composed disciplines.
+
+QUICK defaults to none: obvious bugs use reproduce → fix → green. Resize to
+STANDARD if grilling or architecture work is actually needed; honor explicit
+requests such as “use TDD.” Before loading a selected skill, read its adaptation
+and precedence in [disciplines.md](references/disciplines.md). The workflow
+continues to own delegation, review and context lifecycle.
+
 ## Keep execution economical
 
 - Work locally by default. Delegate only a bounded independent assignment or

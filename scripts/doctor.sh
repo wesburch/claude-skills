@@ -2,10 +2,8 @@
 # Validate that the skills and commands defined in THIS repo are correctly
 # and consistently installed into Claude Code and Codex CLI.
 #
-# Scope: only checks names that exist in this repo (~/claude-skills). It does
-# not know or care about unrelated third-party skills installed elsewhere
-# (e.g. ~/.agents/skills, Claude Code plugin marketplaces) — those have their
-# own install/update mechanisms and are out of scope here.
+# Scope: this repo and third-party/skills.lock. Other installations are out of
+# scope except the superseded Matt plugin. Normal checks use local data only.
 #
 # Read-only: reports problems, fixes nothing. Exit 0 if clean, 1 if issues.
 # Model-registry drift is reported as warnings and never changes the exit code;
@@ -17,6 +15,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLAUDE_SKILLS="$HOME/.claude/skills"
 CODEX_SKILLS="$HOME/.codex/skills"
 CLAUDE_COMMANDS="$HOME/.claude/commands"
+
+UPSTREAM=0
+case "${1:-}" in
+  --upstream) UPSTREAM=1 ;;
+  "") ;;
+  *) echo "Usage: $0 [--upstream]" >&2; exit 2 ;;
+esac
+[[ $# -le 1 ]] || { echo "Usage: $0 [--upstream]" >&2; exit 2; }
+source "$REPO_ROOT/scripts/third-party.sh"
+load_third_party || exit 1
 
 issues=0
 ok=0
@@ -111,6 +119,35 @@ if [[ -d "$REPO_ROOT/agents" ]]; then
   done
   echo
 fi
+
+echo "== Pinned Matt Pocock skills =="
+if [[ -d "$MATT_CHECKOUT" ]]; then
+  pass "checkout exists"
+  if validate_matt_checkout; then pass "checkout origin and clean tree"; else fail "checkout validation"; fi
+  if [[ "$(git -C "$MATT_CHECKOUT" rev-parse HEAD 2>/dev/null)" == "$MATT_PIN" ]]; then
+    pass "checkout at lock pin $MATT_PIN"
+  else
+    fail "checkout is not at lock pin $MATT_PIN"
+  fi
+else
+  fail "checkout missing: $MATT_CHECKOUT"
+fi
+if [[ -s "$MATT_CHECKOUT/LICENSE" ]]; then pass "upstream license present"; else fail "upstream license missing"; fi
+for skill_path in "${MATT_SKILLS[@]}"; do
+  skill_name="${skill_path##*/}"
+  if [[ -s "$MATT_CHECKOUT/$skill_path/SKILL.md" ]]; then pass "$skill_name source"; else fail "$skill_name source missing"; fi
+  check_link "Claude $skill_name" "$CLAUDE_SKILLS/$skill_name" "$MATT_CHECKOUT/$skill_path"
+  check_link "Codex $skill_name" "$CODEX_SKILLS/$skill_name" "$MATT_CHECKOUT/$skill_path"
+done
+if check_matt_plugin; then pass "superseded Matt plugin disabled"; else fail "superseded Matt plugin enabled or settings unreadable"; fi
+if [[ "$UPSTREAM" -eq 1 ]]; then
+  if upstream_head="$(git ls-remote "$MATT_SOURCE" HEAD)"; then
+    pass "upstream reachable: $upstream_head (informational; lock unchanged)"
+  else
+    fail "explicit upstream check could not reach source"
+  fi
+fi
+echo
 
 ROUTING="$REPO_ROOT/engineering-workflow/scripts/model-routing"
 if [[ -x "$ROUTING" ]]; then

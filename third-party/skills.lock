@@ -1,0 +1,8 @@
+# Pinned external skills. Fields are whitespace-separated; paths contain no spaces.
+source https://github.com/mattpocock/skills.git
+commit d81f3a183412e71a5b1e84ca21bc1a35eea03a60
+skill skills/productivity/grilling
+skill skills/engineering/domain-modeling
+skill skills/engineering/tdd
+skill skills/engineering/diagnosing-bugs
+skill skills/engineering/codebase-design

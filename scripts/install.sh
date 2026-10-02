@@ -8,8 +8,8 @@
 # Usage: install.sh [--dry-run]   (--dry-run prints what would change)
 #
 # Non-destructive: only ever creates a new symlink or repoints a symlink that
-# already points somewhere inside this repo. If the target path exists and is
-# a real file/directory (or a symlink pointing elsewhere), it is left alone
+# already points inside this repo or the managed third-party skills checkout.
+# A real file/directory (or a symlink pointing elsewhere) is left alone
 # and reported so you can resolve it by hand.
 
 set -euo pipefail
@@ -22,7 +22,17 @@ CLAUDE_AGENTS="$HOME/.claude/agents"
 CODEX_AGENTS="$HOME/.codex/agents"
 
 DRY_RUN=0
-[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+case "${1:-}" in
+  --dry-run) DRY_RUN=1 ;;
+  "") ;;
+  *) echo "Usage: $0 [--dry-run]" >&2; exit 2 ;;
+esac
+[[ $# -le 1 ]] || { echo "Usage: $0 [--dry-run]" >&2; exit 2; }
+
+source "$REPO_ROOT/scripts/third-party.sh"
+load_third_party
+# Preflight/update the pinned checkout before installing any links.
+prepare_matt_checkout
 
 linked=0
 skipped=0
@@ -40,7 +50,7 @@ link_one() {
       skipped=$((skipped + 1))
       return
     fi
-    if [[ "$current" == "$REPO_ROOT"/* ]]; then
+    if [[ "$current" == "$REPO_ROOT"/* || "$current" == "$MATT_CHECKOUT"/skills/* ]]; then
       # Symlink already managed by this repo, just pointing at something
       # stale (e.g. a renamed skill) — safe to repoint.
       if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -51,7 +61,7 @@ link_one() {
       linked=$((linked + 1))
       return
     fi
-    # Symlink exists but points outside this repo — don't touch it.
+    # Unmanaged symlink — do not touch it.
     conflicts+=("$target (symlink -> $current)")
     return
   fi
@@ -115,6 +125,12 @@ for skill_dir in "$REPO_ROOT"/*/; do
 
   link_one "$CLAUDE_SKILLS/$skill_name" "$REPO_ROOT/$skill_name"
   link_one "$CODEX_SKILLS/$skill_name" "$REPO_ROOT/$skill_name"
+done
+
+for skill_path in "${MATT_SKILLS[@]}"; do
+  skill_name="${skill_path##*/}"
+  link_one "$CLAUDE_SKILLS/$skill_name" "$MATT_CHECKOUT/$skill_path"
+  link_one "$CODEX_SKILLS/$skill_name" "$MATT_CHECKOUT/$skill_path"
 done
 
 if [[ -d "$REPO_ROOT/commands" ]]; then

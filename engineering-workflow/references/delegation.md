@@ -29,6 +29,10 @@ Give a fresh agent only the context needed to execute:
   Prefer completion notifications; otherwise use bounded waits/status checks
   with backoff, not a tight polling loop. Return a compact report.
 - Verification commands or behavior to check; prior failures and hypotheses.
+- Selected discipline path, if any, and its applicable workflow adaptations
+  from [disciplines.md](disciplines.md); load only that discipline.
+- If `GLOSSARY.md` exists, use its terms. Questions for the user return to the
+  host; discoverable facts remain research work.
 - Expected compact return and stop conditions.
 
 Do not attach the full parent transcript. Reviewers receive requirements and

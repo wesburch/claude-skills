@@ -1,0 +1,234 @@
+#!/usr/bin/env ruby
+# Offline integration tests using disposable repositories, homes and a Git shim.
+require 'fileutils'
+require 'json'
+require 'minitest/autorun'
+require 'open3'
+require 'tmpdir'
+
+class ThirdPartyTest < Minitest::Test
+  SOURCE = File.expand_path('..', __dir__)
+  URL = 'https://github.com/mattpocock/skills.git'
+  PATHS = %w[skills/productivity/grilling skills/engineering/domain-modeling skills/engineering/tdd skills/engineering/diagnosing-bugs skills/engineering/codebase-design].freeze
+
+  def setup
+    @tmp = Dir.mktmpdir('third-party-test')
+    @repo = File.join(@tmp, 'repo')
+    @home = File.join(@tmp, 'home')
+    @upstream = File.join(@tmp, 'upstream')
+    @checkout = File.join(@home, '.local/share/claude-skills/third-party/mattpocock-skills')
+    @bin = File.join(@tmp, 'bin')
+    @log = File.join(@tmp, 'git-network.log')
+    FileUtils.mkdir_p([@repo, @home, @upstream, @bin])
+    @git = Open3.capture2('which', 'git').first.strip
+    git(@upstream, 'init', '-q')
+    git(@upstream, 'config', 'user.email', 'fixture@example.invalid')
+    git(@upstream, 'config', 'user.name', 'Fixture')
+    PATHS.each do |path|
+      FileUtils.mkdir_p(File.join(@upstream, path))
+      File.write(File.join(@upstream, path, 'SKILL.md'), "---\nname: #{File.basename(path)}\ndescription: Fixture\n---\n")
+    end
+    File.write(File.join(@upstream, 'LICENSE'), 'Fixture license')
+    git(@upstream, 'add', '.')
+    git(@upstream, 'commit', '-qm', 'Pinned fixture')
+    @pin = git(@upstream, 'rev-parse', 'HEAD').strip
+    File.write(File.join(@upstream, 'newer'), 'Unapproved newer revision')
+    git(@upstream, 'add', '.')
+    git(@upstream, 'commit', '-qm', 'Newer upstream HEAD')
+    @newer = git(@upstream, 'rev-parse', 'HEAD').strip
+    FileUtils.cp_r(File.join(SOURCE, 'scripts'), @repo)
+    FileUtils.mkdir_p(File.join(@repo, 'third-party'))
+    File.write(File.join(@repo, 'third-party/skills.lock'), "source #{URL}\ncommit #{@pin}\n" + PATHS.map { |p| "skill #{p}\n" }.join)
+    git(@repo, 'init', '-q')
+    git(@repo, 'config', 'user.email', 'fixture@example.invalid')
+    git(@repo, 'config', 'user.name', 'Fixture')
+    git(@repo, 'add', '.')
+    git(@repo, 'commit', '-qm', 'Fixture installer')
+    # Intercept all network operations. Clone the local fixture, preserving the
+    # approved remote identity. A fetch/ls-remote fails instead of using network.
+    File.write(File.join(@bin, 'git'), <<~SH)
+      #!/usr/bin/env bash
+      for arg in "$@"; do
+        if [[ "$arg" == fetch || "$arg" == ls-remote ]]; then
+          echo "$arg" >> "$FIXTURE_LOG"
+          exit 91
+        fi
+      done
+      if [[ "$1" == clone ]]; then
+        echo clone >> "$FIXTURE_LOG"
+        [[ "$2" == --no-checkout && "$3" == '#{URL}' ]] || exit 92
+        "$FIXTURE_GIT" clone --no-checkout "$FIXTURE_UPSTREAM" "$4" || exit
+        exec "$FIXTURE_GIT" -C "$4" remote set-url origin '#{URL}'
+      fi
+      exec "$FIXTURE_GIT" "$@"
+    SH
+    FileUtils.chmod(0o755, File.join(@bin, 'git'))
+    @env = { 'HOME' => @home, 'PATH' => "#{@bin}:#{ENV.fetch('PATH')}",
+             'FIXTURE_GIT' => @git, 'FIXTURE_LOG' => @log, 'FIXTURE_UPSTREAM' => @upstream }
+  end
+
+  def teardown = FileUtils.remove_entry(@tmp)
+
+  def git(dir, *args)
+    out, err, status = Open3.capture3(@git, '-C', dir, *args)
+    assert status.success?, err
+    out
+  end
+
+  def run_script(name, *args)
+    out, err, status = Open3.capture3(@env, 'bash', File.join(@repo, 'scripts', name), *args, chdir: @repo)
+    [out + err, status.exitstatus]
+  end
+
+  def install
+    out, code = run_script('install.sh')
+    assert_equal 0, code, out
+  end
+
+  def link(host, name = 'tdd') = File.join(@home, ".#{host}/skills", name)
+
+  def test_dry_run_has_no_writes_or_network_then_pinned_install_is_idempotent
+    before = Dir.glob(File.join(@home, '**/*'), File::FNM_DOTMATCH)
+    out, code = run_script('install.sh', '--dry-run')
+    assert_equal 0, code, out
+    assert_equal before, Dir.glob(File.join(@home, '**/*'), File::FNM_DOTMATCH)
+    refute File.exist?(@log)
+    install
+    assert_equal @pin, git(@checkout, 'rev-parse', 'HEAD').strip
+    %w[claude codex].each do |host|
+      assert_equal PATHS.map { |p| File.basename(p) }.sort, Dir.children(File.dirname(link(host))).sort
+      PATHS.each { |p| assert_equal File.join(@checkout, p), File.readlink(link(host, File.basename(p))) }
+    end
+    first = File.read(@log)
+    install
+    assert_equal first, File.read(@log)
+    out, code = run_script('doctor.sh')
+    assert_equal 0, code, out
+    assert_equal first, File.read(@log)
+    out, code = run_script('doctor.sh', '--upstream')
+    assert_equal 1, code, out
+    assert_includes File.read(@log), 'ls-remote'
+  end
+
+  def test_clean_checkout_moves_to_lock_only_without_fetch_when_object_exists
+    install
+    git(@checkout, 'checkout', '--detach', @newer)
+    out, code = run_script('doctor.sh')
+    assert_equal 1, code
+    assert_includes out, 'not at lock pin'
+    out, code = run_script('install.sh', '--dry-run')
+    assert_equal 0, code, out
+    assert_equal @newer, git(@checkout, 'rev-parse', 'HEAD').strip
+    install
+    assert_equal @pin, git(@checkout, 'rev-parse', 'HEAD').strip
+    assert_equal "clone\n", File.read(@log)
+  end
+
+  def test_dirty_tracked_and_untracked_checkout_refused_even_at_pin
+    install
+    ['LICENSE', 'personal-notes'].each do |path|
+      full = File.join(@checkout, path)
+      original = File.read(full) if File.exist?(full)
+      File.write(full, 'preserve me')
+      ['', '--dry-run'].each do |arg|
+        out, code = run_script('install.sh', *[arg].reject(&:empty?))
+        assert_equal 1, code, out
+        assert_includes out, 'Dirty third-party checkout'
+        assert_equal 'preserve me', File.read(full)
+      end
+      original ? File.write(full, original) : File.delete(full)
+    end
+  end
+
+  def test_unmanaged_checkout_and_wrong_origin_refused
+    FileUtils.mkdir_p(@checkout)
+    File.write(File.join(@checkout, 'personal'), 'preserve')
+    out, code = run_script('install.sh')
+    assert_equal 1, code
+    assert_includes out, 'Not a standalone checkout'
+    assert_equal 'preserve', File.read(File.join(@checkout, 'personal'))
+    FileUtils.remove_entry(@checkout)
+    install
+    git(@checkout, 'remote', 'set-url', 'origin', '/unmanaged')
+    out, code = run_script('install.sh')
+    assert_equal 1, code
+    assert_includes out, 'Unexpected third-party origin'
+  end
+
+  def test_conflicts_preserved_and_managed_links_repaired
+    install
+    File.unlink(link('claude'))
+    File.write(link('claude'), 'personal file')
+    File.unlink(link('codex'))
+    File.symlink('/unmanaged/skill', link('codex'))
+    out, code = run_script('install.sh')
+    assert_equal 1, code
+    assert_includes out, 'Conflicts'
+    assert_equal 'personal file', File.read(link('claude'))
+    assert_equal '/unmanaged/skill', File.readlink(link('codex'))
+    File.unlink(link('claude'))
+    File.unlink(link('codex'))
+    File.symlink(File.join(@checkout, 'skills/old/tdd'), link('claude'))
+    install
+    assert_equal File.join(@checkout, 'skills/engineering/tdd'), File.readlink(link('claude'))
+  end
+
+  def test_doctor_missing_broken_and_wrong_links_license_and_plugin
+    out, code = run_script('doctor.sh')
+    assert_equal 1, code
+    assert_includes out, 'checkout missing'
+    install
+    File.unlink(link('claude'))
+    File.unlink(link('codex'))
+    File.symlink('/wrong', link('codex'))
+    FileUtils.remove_entry(File.join(@checkout, 'skills/productivity/grilling'))
+    File.delete(File.join(@checkout, 'LICENSE'))
+    File.write(File.join(@home, '.claude/settings.json'), JSON.generate('enabledPlugins' => {'mattpocock-skills@claude-plugins-official' => true}))
+    out, code = run_script('doctor.sh')
+    assert_equal 1, code
+    ['Claude tdd: missing', 'Codex tdd: symlink points to wrong target', 'symlink is broken', 'upstream license missing', 'still enabled'].each { |s| assert_includes out, s }
+  end
+
+  def test_plugin_disabled_and_malformed_settings
+    install
+    settings = File.join(@home, '.claude/settings.json')
+    File.write(settings, JSON.generate('enabledPlugins' => {'mattpocock-skills@claude-plugins-official' => false}))
+    out, code = run_script('doctor.sh')
+    assert_equal 0, code, out
+    File.write(settings, '{')
+    out, code = run_script('doctor.sh')
+    assert_equal 1, code
+    assert_includes out, 'settings unreadable'
+  end
+
+  def test_missing_pin_fetch_failure_preserves_current_checkout
+    install
+    lock = File.join(@repo, 'third-party/skills.lock')
+    File.write(lock, File.read(lock).sub(@pin, 'f' * 40))
+    out, code = run_script('install.sh')
+    refute_equal 0, code, out
+    assert_equal @pin, git(@checkout, 'rev-parse', 'HEAD').strip
+    assert_equal "clone\nfetch\n", File.read(@log)
+    assert_equal File.join(@checkout, 'skills/engineering/tdd'), File.readlink(link('claude'))
+  end
+
+  def test_project_plugin_override_is_detected
+    install
+    FileUtils.mkdir_p(File.join(@repo, '.claude'))
+    File.write(File.join(@repo, '.claude/settings.json'), JSON.generate('enabledPlugins' => {'mattpocock-skills@claude-plugins-official' => true}))
+    out, code = run_script('doctor.sh')
+    assert_equal 1, code
+    assert_includes out, 'still enabled'
+  end
+
+  def test_invalid_lock_and_unknown_options_fail_before_changes
+    File.write(File.join(@repo, 'third-party/skills.lock'), "source #{URL}\ncommit main\nskill ../../escape\n")
+    out, code = run_script('install.sh')
+    refute_equal 0, code, out
+    refute File.exist?(@checkout)
+    %w[install.sh doctor.sh].each do |name|
+      out, code = run_script(name, '--typo')
+      assert_equal 2, code, out
+    end
+  end
+end

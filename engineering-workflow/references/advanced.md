@@ -19,6 +19,23 @@ Add a coordinator only when an independently managed stream has enough routing,
 waiting, or recovery work to justify the extra context and messages. The main
 session should not duplicate its bookkeeping. Respect runtime concurrency limits.
 
+## Decompose only where dependencies warrant it
+
+Prefer vertical tracer slices: each delivers a narrow end-to-end behavior with
+an independently checkable outcome. Record only real blocked-by edges in the
+existing task list; ready work has all prerequisites integrated. Recompute that
+ready frontier after each integration rather than treating assignment order as
+a fixed sequence. An already-specified task needs decomposition, not grilling.
+
+For wide mechanical refactors that cannot land as vertical slices, expand →
+migrate → contract: add the compatible form, migrate callers in checkable
+batches, then remove the old form once all migrations are integrated. If batches
+cannot stay green alone, name the shared integration point where green is
+required. The integration worker syncs the current integration tip and reruns
+its checks on the combined result before declaring the slice complete.
+STANDARD can use a compact dependency list when needed; it does not require
+tickets, a new tracker or an extra coordination role.
+
 ## Planning and specialist review
 
 For consequential architecture or uncertain decomposition, add a planning review
