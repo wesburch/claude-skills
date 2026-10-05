@@ -40,6 +40,8 @@ Assess only at a checkpoint:
 
 Otherwise continue without comment. Context-size warnings and repeated automatic
 compaction call for a compaction assessment only; they never define a boundary.
+Use actual context measurements when available; do not invent a fullness
+estimate. Tokens spent alone do not justify replacing the manager.
 
 Pollution symptoms:
 - the user has corrected the same misunderstanding more than once;
@@ -67,8 +69,37 @@ Pollution symptoms:
    bootstrap prompt can carry it.
 7. Otherwise continue.
 
-Each outcome is a recommendation. The user ends, clears and compacts sessions.
-State a recommendation once per boundary, and drop it if the user declines.
+Explain the recommendation at meaningful milestones when work remains, including
+when continuing here is best. Name the next ready item from the current agreed
+plan; if prerequisites are unmet, identify the blocker. Update existing project
+records before handing off. State a recommendation once per checkpoint and
+respect a declined session change. The user ends, clears and compacts sessions.
+
+## Continuation preference
+
+Manual handoff is the default: prepare the handoff and bootstrap prompt as soon
+as a fresh manager is recommended; the user starts the successor. This governs
+manager transitions, not routine implementation, verification or reviewer
+delegation within an authorized assignment.
+
+The user may explicitly request automatic continuation for a defined feature
+batch or objective with a stopping point. Carry that preference, its scope,
+provider/model constraints, any budget limits and remaining work into each
+handoff. Existing authorization remains valid within those bounds; prepare the
+same durable handoff and use supported runtime tools to start the successor only
+when their authorization requirements are met. If unavailable, return the manual
+prompt and say the successor was not started. Confirm the runtime reports the
+successor started before relinquishing ownership; do not leave two managers
+implementing the same work.
+
+Keep milestone summaries visible even during automatic continuation. Pause
+dependent work for unresolved user-owned decisions, scope changes, actions
+requiring approval or blockers that remain after the existing verification and
+bounded-recovery rules. Report status and the needed decision. Stop at the
+agreed endpoint or budget limit; optional and deferred work stays outside the
+batch. Automatic continuation does not waive completion or independent-review
+gates. A successor must retain these constraints rather than assume broader
+authority from a handoff.
 
 ## Compact
 
@@ -104,6 +135,8 @@ Required:
   the owner deferred or ruled out of scope.
 - **Baseline:** commands that re-establish it. Record a result only together
   with the commit it was observed at.
+- **Continuation:** manual or explicitly authorized automatic continuation,
+  including the agreed scope, stopping point and applicable constraints.
 
 When applicable:
 - settled decisions not yet recorded by their owner, one line each (many means:
@@ -139,9 +172,11 @@ End with a short prompt for the user to paste:
 - where the handoff is, or the handoff itself;
 - an instruction to check HEAD against the commit it describes;
 - the objective and the mode;
+- the next ready plan item, completed work not to repeat, and continuation limits;
 - what not to load.
 
-The user starts the new session.
+For manual handoff, the user starts the new session. For explicitly authorized
+automatic continuation, use the same prompt under the rules above.
 
 ## Checks
 

@@ -113,7 +113,18 @@ continues to own delegation, review and context lifecycle.
   cover subsequent edits. Wider checks follow risk, not ritual repetition.
 - Report what changed, actual checks, review outcome when applicable, and
   residual uncertainty. Passing tests alone does not prove requirements met.
-  Add a context recommendation only when the next step crosses a boundary.
+- At meaningful milestones, update the existing plan/task record and relevant
+  documentation with completed work, verification, decisions and open items.
+  State whether the current objective is complete, awaiting review or blocked;
+  name required remaining steps separately from optional or deferred work.
+  Identify the next ready item from the agreed plan and its dependencies, or
+  say none is established. Completing one feature does not complete the plan.
+- When work remains, recommend continuing here, compacting or a fresh manager,
+  with a concrete reason, using [context-lifecycle.md](references/context-lifecycle.md).
+  When recommending a fresh manager, include the ready-to-paste handoff without
+  waiting to be asked. If no required work remains, say so; no handoff is needed.
+  Keep this brief and continue already-authorized work within the current
+  assignment; a milestone summary is not an extra approval gate.
 
 No mandatory state log, task artifact, knowledge handoff, or human approval
 ceremony. Project gates and authorization still govern merge/deploy/external
@@ -136,8 +147,9 @@ as well; changing the shared skill alone cannot remove a stronger repo override.
 - For repeated failures: routing's bounded recovery; do not repeat an unchanged approach.
 - For a reusable decision or discovery at completion:
   [knowledge-handoff.md](references/knowledge-handoff.md). Routine changes skip it.
-- At a milestone, a new objective, an ownership or runtime change, or stale or
-  contradictory context: [context-lifecycle.md](references/context-lifecycle.md).
+- At a milestone, an explicit request for automatic continuation, a new objective,
+  an ownership or runtime change, or stale or contradictory context:
+  [context-lifecycle.md](references/context-lifecycle.md).
 
 Do not load all references, spawn a role roster, or create tracking documents
 just because the skill was invoked.
